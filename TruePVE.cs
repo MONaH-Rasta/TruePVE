@@ -9,10 +9,27 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
+/*
+    1.1.1:
+    Fixed CanBeTargeted performance issue
+    Fixed HasEmptyMapping.InvalidOperationException
+
+    Credits to RFC1920 for the following:
+        Update some old crufty logging calls (nivex callout)
+        Add new flag, NoTurretDamageScientist. If added to ruleset, turrets will not kill scientist NPCs. Prior to this with the new turrets and turret checks, they weren't killable. To continue with that behavior, set the flag.
+        Add /tpve_enable and tpve.enable to toggle enabling/disabling the plugin
+        Add flag NoHeliDamageQuarry
+        Fix CheckTurretInitiator function so that it only finds weapons in AutoTurrets 
+        Add new ruleset flag, NoTurretDamagePlayer. Perhaps a better way will come soon.
+        Ensure that valid rulesets don't get deleted
+        Add bailout if incoming damage type is decay. Added first pass fix for AddOrUpdateMapping() clearing all but the default ruleset. Probably more work to be done.
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.0.4", ResourceId = 1789)]
+    [Info("TruePVE", "RFC1920", "1.1.1")]
     [Description("Improvement of the default Rust PVE behavior")]
+    // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
     {
         #region Variables
@@ -32,9 +49,10 @@ namespace Oxide.Plugins
         // usage information string with formatting
         public string usageString;
         // valid commands
-        enum Command { def, sched, trace, usage };
+        enum Command { def, sched, trace, usage, enable };
         // valid configuration options
-        public enum Option {
+        public enum Option
+        {
             handleDamage, // (true) enable TruePVE damage handling hooks
             useZones      // (true) use ZoneManager/LiteZones for zone-specific damage behavior (requires modification of ZoneManager.cs)
         };
@@ -63,8 +81,12 @@ namespace Oxide.Plugins
             TurretsIgnorePlayers = 1 << 11,
             CupboardOwnership = 1 << 12,
             SelfDamage = 1 << 13,
-            TwigDamage = 1 << 14
+            TwigDamage = 1 << 14,
+            NoTurretDamagePlayer = 1 << 15,
+            NoHeliDamageQuarry = 1 << 16,
+            NoTurretDamageScientist = 1 << 17
         }
+
         // timer to check for schedule updates
         Timer scheduleUpdateTimer;
         // current ruleset
@@ -90,6 +112,7 @@ namespace Oxide.Plugins
         float traceTimeout = 300f;
         // trace timeout timer
         Timer traceTimer;
+        bool tpveEnabled = true;
         #endregion
 
         #region Lang
@@ -99,6 +122,7 @@ namespace Oxide.Plugins
             lang.RegisterMessages(new Dictionary<string, string>
             {
                 {"Prefix", "<color=#FFA500>[ TruePVE ]</color>" },
+                {"Enable", "TruePVE enable set to {0}" },
 
                 {"Header_Usage", "---- TruePVE usage ----"},
                 {"Cmd_Usage_def", "Loads default configuration and data"},
@@ -133,6 +157,8 @@ namespace Oxide.Plugins
                 {"Notify_MappingDeleted", "Mapping for \"{0}\" => \"{1}\" deleted" },
                 {"Notify_TraceToggle", "Trace mode toggled {0}" },
 
+                {"Format_EnableColor", "#00FFFF"}, // cyan
+                {"Format_EnableSize", "12"},
                 {"Format_NotifyColor", "#00FFFF"}, // cyan
                 {"Format_NotifySize", "12"},
                 {"Format_HeaderColor", "#FFA500"}, // orange
@@ -154,10 +180,11 @@ namespace Oxide.Plugins
             LoadDefaultMessages();
             string baseCommand = "tpve";
             // register console commands automagically
-            foreach(Command command in Enum.GetValues(typeof(Command)))
+            foreach (Command command in Enum.GetValues(typeof(Command)))
                 cmd.AddConsoleCommand((baseCommand + "." + command.ToString()), this, "CommandDelegator");
             // register chat commands
             cmd.AddChatCommand(baseCommand + "_prod", this, "HandleProd");
+            cmd.AddChatCommand(baseCommand + "_enable", this, "EnableToggle");
             cmd.AddChatCommand(baseCommand, this, "ChatCommandDelegator");
             // build usage string for console (without sizing)
             usageString = WrapColor("orange", GetMessage("Header_Usage")) + "\n" +
@@ -172,7 +199,7 @@ namespace Oxide.Plugins
         // on unloaded
         void Unload()
         {
-            if(scheduleUpdateTimer != null)
+            if (scheduleUpdateTimer != null)
                 scheduleUpdateTimer.Destroy();
             Instance = null;
         }
@@ -180,7 +207,7 @@ namespace Oxide.Plugins
         // plugin loaded
         void OnPluginLoaded(Plugin plugin)
         {
-            if(plugin.Name == "ZoneManager")
+            if (plugin.Name == "ZoneManager")
                 ZoneManager = plugin;
             if (plugin.Name == "LiteZones")
                 LiteZones = plugin;
@@ -228,17 +255,17 @@ namespace Oxide.Plugins
         void CommandDelegator(ConsoleSystem.Arg arg)
         {
             // return if user doesn't have access to run console command
-            if(!HasAccess(arg)) return;
+            if (!HasAccess(arg)) return;
 
             string cmd = arg.cmd.Name;
-            if(!Enum.IsDefined(typeof(Command), cmd))
+            if (!Enum.IsDefined(typeof(Command), cmd))
             {
                 // shouldn't hit this
                 SendMessage(arg, "Error_InvalidParameter");
             }
             else
             {
-                switch((Command) Enum.Parse(typeof(Command), cmd))
+                switch ((Command)Enum.Parse(typeof(Command), cmd))
                 {
                     case Command.def:
                         HandleDef(arg);
@@ -254,13 +281,28 @@ namespace Oxide.Plugins
                         else
                             traceTimer?.Destroy();
                         return;
+                    case Command.enable:
+                        tpveEnabled = !tpveEnabled;
+                        SendMessage(arg, "Enable", new object[] { tpveEnabled.ToString() });
+                        return;
                     case Command.usage:
                         ShowUsage(arg);
                         return;
                 }
-                SendMessage(arg, "Error_InvalidParamForCmd", new object[] {cmd});
+                SendMessage(arg, "Error_InvalidParamForCmd", new object[] { cmd });
             }
             ShowUsage(arg);
+        }
+
+        void EnableToggle(BasePlayer player, string command, string[] args)
+        {
+            if (!IsAdmin(player))
+            {
+                SendMessage(player, "Error_NoPermission");
+            }
+
+            tpveEnabled = !tpveEnabled;
+            SendMessage(player, "Enable", new object[] { tpveEnabled.ToString() });
         }
 
         // handle setting defaults
@@ -277,11 +319,11 @@ namespace Oxide.Plugins
         // handle prod command (raycast to determine what player is looking at)
         void HandleProd(BasePlayer player, string command, string[] args)
         {
-            if(!IsAdmin(player))
+            if (!IsAdmin(player))
                 SendMessage(player, "Error_NoPermission");
 
             object entity;
-            if(!GetRaycastTarget(player, out entity) || entity == null)
+            if (!GetRaycastTarget(player, out entity) || entity == null)
             {
                 SendReply(player, WrapSize(12, WrapColor("red", GetMessage("Error_NoEntityFound", player.UserIDString))));
                 return;
@@ -329,7 +371,7 @@ namespace Oxide.Plugins
                 // if args[1] is empty, delete mapping
                 string from = args[0];
                 string to = null;
-                if(args.Length == 2)
+                if (args.Length == 2)
                     to = args[1];
 
                 if (to != null && !data.ruleSets.Select(r => r.name).Contains(to) && to != "exclude")
@@ -378,7 +420,7 @@ namespace Oxide.Plugins
                         }
                     }
 
-                    if(dirty)
+                    if (dirty)
                         // save changes to config file
                         SaveData();
                 }
@@ -395,18 +437,18 @@ namespace Oxide.Plugins
                 return;
             }
             string message = "";
-            if(!data.schedule.valid)
+            if (!data.schedule.valid)
             {
                 message = "Notify_InvalidSchedule";
             }
-            else if(arg.Args[0] == "enable")
+            else if (arg.Args[0] == "enable")
             {
-                if(data.schedule.enabled) return;
+                if (data.schedule.enabled) return;
                 data.schedule.enabled = true;
                 TimerLoop();
                 message = "Notify_SchedSetEnabled";
             }
-            else if(arg.Args[0] == "disable")
+            else if (arg.Args[0] == "disable")
             {
                 if (!data.schedule.enabled) return;
                 data.schedule.enabled = false;
@@ -415,7 +457,7 @@ namespace Oxide.Plugins
                 message = "Notify_SchedSetDisabled";
             }
             object[] opts = new object[] { };
-            if(message == "")
+            if (message == "")
             {
                 message = "Error_InvalidParameter";
                 opts = new object[] { arg.Args[0] };
@@ -431,9 +473,12 @@ namespace Oxide.Plugins
             CheckVersion();
             Config.Settings.NullValueHandling = NullValueHandling.Include;
             bool dirty = false;
-            try {
+            try
+            {
                 data = Config.ReadObject<TruePVEData>() ?? null;
-            } catch (Exception) {
+            }
+            catch (Exception)
+            {
                 data = new TruePVEData();
             }
             if (data == null)
@@ -458,8 +503,8 @@ namespace Oxide.Plugins
         bool CheckConfig()
         {
             bool dirty = false;
-            foreach(Option option in Enum.GetValues(typeof(Option)))
-                if(!data.config.ContainsKey(option))
+            foreach (Option option in Enum.GetValues(typeof(Option)))
+                if (!data.config.ContainsKey(option))
                 {
                     data.config[option] = defaults[(int)option];
                     dirty = true;
@@ -626,7 +671,10 @@ namespace Oxide.Plugins
         object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitinfo)
         {
             //if(entity == null || hitinfo == null || hitinfo.HitEntity == null) return null;
-            if(!data.config[Option.handleDamage])
+            if (hitinfo.damageTypes.Has(Rust.DamageType.Decay)) return null;
+            if (!tpveEnabled)
+                return null;
+            if (!data.config[Option.handleDamage])
                 return null;
             return HandleDamage(entity, hitinfo);
         }
@@ -645,12 +693,12 @@ namespace Oxide.Plugins
             try
             {
                 object extCanTakeDamage = Interface.CallHook("CanEntityTakeDamage", new object[] { entity, hitinfo });
-                if(extCanTakeDamage != null)
+                if (extCanTakeDamage != null)
                 {
-                    return (bool) extCanTakeDamage;
+                    return (bool)extCanTakeDamage;
                 }
             }
-            catch {}
+            catch { }
 
             // if default global is not enabled, return true (allow all damage)
             if (currentRuleSet == null || currentRuleSet.IsEmpty() || !currentRuleSet.enabled)
@@ -667,15 +715,15 @@ namespace Oxide.Plugins
                 return true;
 
             // allow damage to door barricades and covers
-            if(entity is Barricade && (entity.ShortPrefabName.Contains("door_barricade") || entity.ShortPrefabName.Contains("cover")))
+            if (entity is Barricade && (entity.ShortPrefabName.Contains("door_barricade") || entity.ShortPrefabName.Contains("cover")))
                 return true;
 
             // if entity is a barrel, trash can, or giftbox, allow damage (exclude water barrels)
-            if(entity.ShortPrefabName.Contains("barrel") ||
+            if (entity.ShortPrefabName.Contains("barrel") ||
                entity.ShortPrefabName.Equals("loot_trash") ||
                entity.ShortPrefabName.Equals("giftbox_loot"))
             {
-                if(!entity.ShortPrefabName.Equals("waterbarrel"))
+                if (!entity.ShortPrefabName.Equals("waterbarrel"))
                 {
                     return true;
                 }
@@ -683,12 +731,25 @@ namespace Oxide.Plugins
 
             if (trace)
             {
-                Trace("======================" + Environment.NewLine +
+                // Sometimes the initiator is not the attacker (turrets)
+                try
+                {
+                    Trace("======================" + Environment.NewLine +
                       "==  STARTING TRACE  ==" + Environment.NewLine +
                       "==  " + DateTime.Now.ToString("HH:mm:ss.fffff") + "  ==" + Environment.NewLine +
                       "======================");
-                Trace($"From: {hitinfo.Initiator.GetType().Name}, {hitinfo.Initiator.ShortPrefabName}", 1);
-                Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
+                    Trace($"From: {hitinfo.Initiator.GetType().Name}, {hitinfo.Initiator.ShortPrefabName}", 1);
+                    Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
+                }
+                catch
+                {
+                    Trace("======================" + Environment.NewLine +
+                      "==  STARTING TRACE  ==" + Environment.NewLine +
+                      "==  " + DateTime.Now.ToString("HH:mm:ss.fffff") + "  ==" + Environment.NewLine +
+                      "======================");
+                    Trace($"From: {hitinfo.WeaponPrefab.GetType().Name}, {hitinfo.WeaponPrefab.ShortPrefabName}", 1);
+                    Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
+                }
             }
             // get entity and initiator locations (zones)
             List<string> entityLocations = GetLocationKeys(entity);
@@ -728,19 +789,40 @@ namespace Oxide.Plugins
                     return (bool)hurt;
             }
 
-            // check heli
+            // check heli and turret
             object heli = CheckHeliInitiator(ruleSet, hitinfo);
-            if(heli != null)
+            object turret = CheckTurretInitiator(ruleSet, hitinfo);
+            if (heli != null)
             {
                 if (entity is BasePlayer)
                 {
                     if (trace) Trace($"Initiator is heli, and target is player; flag check results: { (ruleSet.HasFlag(RuleFlags.NoHeliDamagePlayer) ? "flag set; block and return" : "flag not set; allow and return") }", 1);
                     return !ruleSet.HasFlag(RuleFlags.NoHeliDamagePlayer);
                 }
+                if (entity is MiningQuarry)
+                {
+                    if (trace) Trace($"Initiator is heli, and target is quarry; flag check results: { (ruleSet.HasFlag(RuleFlags.NoHeliDamageQuarry) ? "flag set; block and return" : "flag not set; allow and return") }", 1);
+                    return !ruleSet.HasFlag(RuleFlags.NoHeliDamageQuarry);
+                }
                 if (trace) Trace($"Initiator is heli, target is non-player; results: { ((bool)heli ? "allow and return" : "block and return") }", 1);
                 return (bool)heli;
             }
-            // after heli check, return true if initiator is null
+            if (turret != null)
+            {
+                if (entity is Scientist)
+                {
+                    if (trace) Trace($"Initiator is turret, and target is scientist; flag check results: { (ruleSet.HasFlag(RuleFlags.NoTurretDamageScientist) ? "flag set; block and return" : "flag not set; allow and return") }", 1);
+                    return !ruleSet.HasFlag(RuleFlags.NoTurretDamageScientist);
+                }
+                if (entity is BasePlayer)
+                {
+                    if (trace) Trace($"Initiator is turret, and target is player; flag check results: { (ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer) ? "flag set; block and return" : "flag not set; allow and return") }", 1);
+                    return !ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer);
+                }
+                if (trace) Trace($"Initiator is turret, target is non-player; results: { ((bool)turret ? "allow and return" : "block and return") }", 1);
+                return (bool)turret;
+            }
+            // after heli and turret check, return true if initiator is null
             if (hitinfo.Initiator == null)
             {
                 if (trace) Trace("Initiator empty; allow and return", 1);
@@ -784,6 +866,8 @@ namespace Oxide.Plugins
                     return true;
                 }
 
+            //if (ruleSet.HasFlag(RuleFlags.)
+
             if (trace) Trace("No match in pre-checks; evaluating RuleSet rules...", 1);
             return EvaluateRules(entity, hitinfo, ruleSet);
         }
@@ -805,7 +889,7 @@ namespace Oxide.Plugins
         object CheckLock(RuleSet ruleSet, BaseEntity entity, HitInfo hitinfo)
         {
             // exclude deployed items in storage container lock check (since they can't have locks)
-            if(entity.ShortPrefabName.Equals("lantern.deployed") ||
+            if (entity.ShortPrefabName.Equals("lantern.deployed") ||
                entity.ShortPrefabName.Equals("ceilinglight.deployed") ||
                entity.ShortPrefabName.Equals("furnace.large") ||
                entity.ShortPrefabName.Equals("campfire") ||
@@ -826,10 +910,10 @@ namespace Oxide.Plugins
             if (alock.IsLocked()) // is locked, cancel damage except heli
             {
                 // if heliDamageLocked option is false or heliDamage is false, all damage is cancelled
-                if(!ruleSet.HasFlag(RuleFlags.HeliDamageLocked) || ruleSet.HasFlag(RuleFlags.NoHeliDamage)) return false;
+                if (!ruleSet.HasFlag(RuleFlags.HeliDamageLocked) || ruleSet.HasFlag(RuleFlags.NoHeliDamage)) return false;
                 object heli = CheckHeliInitiator(ruleSet, hitinfo);
-                if(heli != null)
-                    return (bool) heli;
+                if (heli != null)
+                    return (bool)heli;
                 return false;
             }
             return null;
@@ -839,17 +923,30 @@ namespace Oxide.Plugins
         object CheckHeliInitiator(RuleSet ruleSet, HitInfo hitinfo)
         {
             // Check for heli initiator
-            if(hitinfo.Initiator is BaseHelicopter ||
+            if (hitinfo.Initiator is BaseHelicopter ||
                (hitinfo.Initiator != null && (
                    hitinfo.Initiator.ShortPrefabName.Equals("oilfireballsmall") ||
                    hitinfo.Initiator.ShortPrefabName.Equals("napalm"))))
                 return !ruleSet.HasFlag(RuleFlags.NoHeliDamage);
-            else if(hitinfo.WeaponPrefab != null) // prevent null spam
+            else if (hitinfo.WeaponPrefab != null) // prevent null spam
             {
-                if(hitinfo.WeaponPrefab.ShortPrefabName.Equals("rocket_heli") ||
+                if (hitinfo.WeaponPrefab.ShortPrefabName.Equals("rocket_heli") ||
                    hitinfo.WeaponPrefab.ShortPrefabName.Equals("rocket_heli_napalm"))
                     return !ruleSet.HasFlag(RuleFlags.NoHeliDamage);
             }
+            return null;
+        }
+
+        object CheckTurretInitiator(RuleSet ruleSet, HitInfo hitinfo)
+        {
+            // Check for turret initiator
+            var turret = hitinfo.Weapon?.GetComponentInParent<AutoTurret>();
+            if (turret != null)
+            {
+                if (trace) Trace("Found WeaponPrefab in a turret", 2);
+                return !ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer);
+            }
+
             return null;
         }
 
@@ -857,18 +954,18 @@ namespace Oxide.Plugins
         bool CheckAuthorized(BaseEntity entity, BasePlayer player, RuleSet ruleSet)
         {
             // Allow twig damage by anyone if ruleset flag is set
-            if(ruleSet.HasFlag(RuleFlags.TwigDamage))
+            if (ruleSet.HasFlag(RuleFlags.TwigDamage))
             {
                 try
                 {
                     var block = entity as BuildingBlock;
-                    if(block.grade == BuildingGrade.Enum.Twigs)
+                    if (block.grade == BuildingGrade.Enum.Twigs)
                     {
-                        if(trace) Trace("Allowing twig destruction...");
+                        if (trace) Trace("Allowing twig destruction...");
                         return true;
                     }
                 }
-                catch {}
+                catch { }
             }
 
             // check if the player is the owner of the entity
@@ -891,8 +988,8 @@ namespace Oxide.Plugins
         // to determine whether to prevent gathering, based on rules
         object OnPlayerAttack(BasePlayer attacker, HitInfo hitinfo)
         {
-            if(attacker == null || hitinfo == null || hitinfo.HitEntity == null) return null;
-            if(hitinfo?.HitEntity is ResourceEntity)
+            if (attacker == null || hitinfo == null || hitinfo.HitEntity == null) return null;
+            if (hitinfo?.HitEntity is ResourceEntity)
             {
                 if (!AllowDamage(hitinfo.HitEntity, hitinfo))
                     return false;
@@ -901,16 +998,13 @@ namespace Oxide.Plugins
         }
 
         // check if entity can be targeted
-        object CanBeTargeted(BaseCombatEntity target, MonoBehaviour turret)
+        object CanBeTargeted(BasePlayer target, MonoBehaviour turret)
         {
             //Puts($"CanBeTargeted called for {target.name}", 2);
-            if (!serverInitialized || target == null || turret == null) return null;
+            if (!serverInitialized || target == null || target.IsNpc || turret == null) return null;
             if (turret as HelicopterTurret)
                 return null;
-            if (target.GetType().IsSubclassOf(typeof(BasePlayer))) return null;
-            BasePlayer player = target as BasePlayer;
-            if (player == null) return null;
-            RuleSet ruleSet = GetRuleSet(player, turret as BaseCombatEntity);
+            RuleSet ruleSet = GetRuleSet(target, turret as BaseCombatEntity);
             if (ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
                 return false;
             return null;
@@ -922,7 +1016,7 @@ namespace Oxide.Plugins
             BasePlayer player = go.GetComponent<BasePlayer>();
             if (player == null || trap == null) return null;
             RuleSet ruleSet = GetRuleSet(trap, player);
-            if(ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers))
+            if (ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers))
                 return false;
             return null;
         }
@@ -930,7 +1024,7 @@ namespace Oxide.Plugins
         // Check exclusion for entities
         bool CheckExclusion(BaseEntity entity0, BaseEntity entity1)
         {
-            if(!serverInitialized) return false;
+            if (!serverInitialized) return false;
             // check for exclusion zones (zones with no rules mapped)
             List<string> e0Locations = GetLocationKeys(entity0);
             List<string> e1Locations = GetLocationKeys(entity1);
@@ -942,7 +1036,7 @@ namespace Oxide.Plugins
             RuleSet ruleSet = currentRuleSet;
             if (e0Locations != null && e1Locations != null && e0Locations.Count() > 0 && e1Locations.Count() > 0)
             {
-                if(trace) Trace($"Beginning RuleSet lookup for [{ (e0Locations.Count == 0 ? "empty" : string.Join(", ", e0Locations.ToArray())) }] and [{ (e1Locations.Count == 0 ? "empty" : string.Join(", ", e1Locations.ToArray())) }]", 2);
+                if (trace) Trace($"Beginning RuleSet lookup for [{ (e0Locations.Count == 0 ? "empty" : string.Join(", ", e0Locations.ToArray())) }] and [{ (e1Locations.Count == 0 ? "empty" : string.Join(", ", e1Locations.ToArray())) }]", 2);
                 List<string> locations = GetSharedLocations(e0Locations, e1Locations);
                 if (trace) Trace($"Shared locations: { (locations.Count == 0 ? "none" : string.Join(", ", locations.ToArray())) }", 3);
                 if (locations != null && locations.Count > 0)
@@ -993,7 +1087,7 @@ namespace Oxide.Plugins
         // Check exclusion for given entity locations
         bool CheckExclusion(List<string> e0Locations, List<string> e1Locations)
         {
-            if(!serverInitialized) return false;
+            if (!serverInitialized) return false;
             if (e0Locations == null || e1Locations == null)
             {
                 if (trace) Trace("No shared locations (empty location) - no exclusions", 3);
@@ -1016,7 +1110,8 @@ namespace Oxide.Plugins
         // add or update a mapping
         bool AddOrUpdateMapping(string key, string ruleset)
         {
-            if(!serverInitialized) return false;
+            LoadConfiguration(); // Added to help ensure that valid rulesets don't get deleted
+            if (!serverInitialized) return false;
             if (string.IsNullOrEmpty(key))
                 return false;
             if (ruleset == null || (!data.ruleSets.Select(r => r.name).Contains(ruleset) && ruleset != "exclude"))
@@ -1034,9 +1129,9 @@ namespace Oxide.Plugins
         }
 
         // remove a mapping
-        bool RemoveMapping(String key)
+        bool RemoveMapping(string key)
         {
-            if(!serverInitialized) return false;
+            if (!serverInitialized) return false;
             if (string.IsNullOrEmpty(key))
                 return false;
             if (data.HasMapping(key))
@@ -1086,7 +1181,7 @@ namespace Oxide.Plugins
         string WrapSize(string size, string input)
         {
             int i = 0;
-            if(int.TryParse(size, out i))
+            if (int.TryParse(size, out i))
                 return WrapSize(i, input);
             return input;
         }
@@ -1094,7 +1189,7 @@ namespace Oxide.Plugins
         // wrap a string in a <size> tag with the passed size
         string WrapSize(int size, string input)
         {
-            if(input == null || input.Equals(""))
+            if (input == null || input.Equals(""))
                 return input;
             return "<size=" + size + ">" + input + "</size>";
         }
@@ -1102,7 +1197,7 @@ namespace Oxide.Plugins
         // wrap a string in a <color> tag with the passed color
         string WrapColor(string color, string input)
         {
-            if(input == null || input.Equals("") || color == null || color.Equals(""))
+            if (input == null || input.Equals("") || color == null || color.Equals(""))
                 return input;
             return "<color=" + color + ">" + input + "</color>";
         }
@@ -1138,43 +1233,43 @@ namespace Oxide.Plugins
         // get location keys from ZoneManager (zone IDs) or LiteZones (zone names)
         private List<string> GetLocationKeys(BaseEntity entity)
         {
-            if(!useZones || entity == null) return null;
+            if (!useZones || entity == null) return null;
             List<string> locations = new List<string>();
             string zname = null;
             if (ZoneManager != null)
             {
                 List<string> zmloc = new List<string>();
-                if(ZoneManager.Version >= new VersionNumber(3, 0, 1))
+                if (ZoneManager.Version >= new VersionNumber(3, 0, 1))
                 {
-                    if(entity is BasePlayer)
+                    if (entity is BasePlayer)
                     {
                         // BasePlayer fix from chadomat
-                        string[] zmlocplr = (string[]) ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
-                        foreach(string s in zmlocplr)
+                        string[] zmlocplr = (string[])ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
+                        foreach (string s in zmlocplr)
                         {
                             zmloc.Add(s);
                         }
                     }
-                    else if(entity.IsValid())
+                    else if (entity.IsValid())
                     {
-                        string[] zmlocent = (string[]) ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
-                        foreach(string s in zmlocent)
+                        string[] zmlocent = (string[])ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
+                        foreach (string s in zmlocent)
                         {
                             zmloc.Add(s);
                         }
                     }
                 }
-                else if(ZoneManager.Version < new VersionNumber(3, 0, 0))
+                else if (ZoneManager.Version < new VersionNumber(3, 0, 0))
                 {
-                    if(entity is BasePlayer)
+                    if (entity is BasePlayer)
                     {
-                        string[] zmlocplr = (string[]) ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
-                        foreach(string s in zmlocplr)
+                        string[] zmlocplr = (string[])ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
+                        foreach (string s in zmlocplr)
                         {
                             zmloc.Add(s);
                         }
                     }
-                    else if(entity.IsValid())
+                    else if (entity.IsValid())
                     {
                         zmloc = (List<string>)ZoneManager.Call("GetEntityZones", new object[] { entity });
                     }
@@ -1184,22 +1279,22 @@ namespace Oxide.Plugins
                     zmloc = null;
                 }
 
-                if(zmloc != null && zmloc.Count > 0)
+                if (zmloc != null && zmloc.Count > 0)
                 {
                     // Add names into list of ID numbers
-                    foreach(string s in zmloc)
+                    foreach (string s in zmloc)
                     {
                         locations.Add(s);
-                        zname = (string) ZoneManager.Call("GetZoneName", s);
-                        if(zname != null) locations.Add(zname);
-                        if(trace) Puts($"Found zone {zname}: {s}");
+                        zname = (string)ZoneManager.Call("GetZoneName", s);
+                        if (zname != null) locations.Add(zname);
+                        if (trace) Puts($"Found zone {zname}: {s}");
                     }
                 }
             }
-            if(LiteZones != null)
+            if (LiteZones != null)
             {
-                List<string> lzloc = (List<string>) LiteZones?.Call("GetEntityZones", new object[] { entity });
-                if(lzloc != null && lzloc.Count > 0)
+                List<string> lzloc = (List<string>)LiteZones?.Call("GetEntityZones", new object[] { entity });
+                if (lzloc != null && lzloc.Count > 0)
                 {
                     locations.AddRange(lzloc);
                 }
@@ -1228,7 +1323,7 @@ namespace Oxide.Plugins
             closestEntity = false;
 
             RaycastHit hit;
-            if(Physics.Raycast(player.eyes.HeadRay(), out hit, 10f))
+            if (Physics.Raycast(player.eyes.HeadRay(), out hit, 10f))
             {
                 closestEntity = hit.GetEntity();
                 return true;
@@ -1249,7 +1344,7 @@ namespace Oxide.Plugins
                 if (data.schedule.broadcast && currentBroadcastMessage != null)
                 {
                     Server.Broadcast(currentBroadcastMessage, GetMessage("Prefix"));
-                    Console.WriteLine(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage);
+                    Puts(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage);
                 }
             }
 
@@ -1264,15 +1359,15 @@ namespace Oxide.Plugins
         // configuration and data storage container
         class TruePVEData
         {
-            [JsonProperty(PropertyName="Config Version")]
+            [JsonProperty(PropertyName = "Config Version")]
             public string configVersion = null;
-            [JsonProperty(PropertyName="Default RuleSet")]
+            [JsonProperty(PropertyName = "Default RuleSet")]
             public string defaultRuleSet = "default";
-            [JsonProperty(PropertyName="Configuration Options")]
-            public Dictionary<Option,bool> config = new Dictionary<Option,bool>();
-            [JsonProperty(PropertyName="Mappings")]
-            public Dictionary<string,string> mappings = new Dictionary<string,string>();
-            [JsonProperty(PropertyName="Schedule")]
+            [JsonProperty(PropertyName = "Configuration Options")]
+            public Dictionary<Option, bool> config = new Dictionary<Option, bool>();
+            [JsonProperty(PropertyName = "Mappings")]
+            public Dictionary<string, string> mappings = new Dictionary<string, string>();
+            [JsonProperty(PropertyName = "Schedule")]
             public Schedule schedule = new Schedule();
             [JsonProperty(PropertyName = "RuleSets")]
             public List<RuleSet> ruleSets = new List<RuleSet>();
@@ -1296,7 +1391,7 @@ namespace Oxide.Plugins
                 if (!groupCache.TryGetValue(entity.net.ID, out groupList))
                 {
                     groupList = groups.Where(g => g.Contains(entity)).Select(g => g.name).ToList();
-                    if(entity.net != null)
+                    if (entity.net != null)
                         groupCache[entity.net.ID] = groupList;
                 }
                 return groupList;
@@ -1312,7 +1407,7 @@ namespace Oxide.Plugins
                 if (mappings.ContainsKey(AllZones) && mappings[AllZones].Equals("exclude")) return true; // exlude all zones
                 if (!mappings.ContainsKey(key)) return false;
                 if (mappings[key].Equals("exclude")) return true;
-                RuleSet r = ruleSets.First(rs => rs.name.Equals(mappings[key]));
+                RuleSet r = ruleSets.FirstOrDefault(rs => rs.name.Equals(mappings[key]));
                 if (r == null) return true;
                 return r.IsEmpty();
             }
@@ -1325,7 +1420,7 @@ namespace Oxide.Plugins
                 }
                 catch (Exception)
                 {
-                    Console.WriteLine("Warning - duplicate ruleset found for default RuleSet: \"" + defaultRuleSet + "\"");
+                    Interface.Oxide.LogWarning($"Warning - duplicate ruleset found for default RuleSet: '{defaultRuleSet}'");
                     return ruleSets.FirstOrDefault(r => r.name == defaultRuleSet);
                 }
             }
@@ -1403,9 +1498,9 @@ namespace Oxide.Plugins
 
             public void ValidateRules()
             {
-                foreach(Rule rule in parsedRules)
-                    if(!rule.valid)
-                        Console.WriteLine("Warning - invalid rule: " + rule.ruleText);
+                foreach (Rule rule in parsedRules)
+                    if (!rule.valid)
+                        Interface.Oxide.LogWarning("Warning - invalid rule: " + rule.ruleText);
             }
 
             // add a rule
@@ -1462,11 +1557,11 @@ namespace Oxide.Plugins
                 // first and last words should be ruleset names
                 string rs0 = splitStr[0];
                 string rs1 = splitStr[splitStr.Length - 1];
-                string[] mid = splitStr.Skip(1).Take(splitStr.Length-2).ToArray();
+                string[] mid = splitStr.Skip(1).Take(splitStr.Length - 2).ToArray();
                 if (mid == null || mid.Length == 0) return false;
 
                 bool canHurt = true;
-                foreach(string s in mid)
+                foreach (string s in mid)
                     if (s.Equals("cannot") || s.Equals("can't"))
                         canHurt = false;
 
@@ -1488,11 +1583,13 @@ namespace Oxide.Plugins
             public string name;
             public string members
             {
-                get {
+                get
+                {
                     if (memberList == null || memberList.Count == 0) return "";
                     return string.Join(", ", memberList.ToArray());
                 }
-                set {
+                set
+                {
                     if (value == null || value.Equals("")) return;
                     memberList = value.Split(',').Select(s => s.Trim()).ToList();
                 }
@@ -1501,11 +1598,13 @@ namespace Oxide.Plugins
 
             public string exclusions
             {
-                get {
+                get
+                {
                     if (exclusionList == null || exclusionList.Count == 0) return "";
                     return string.Join(", ", exclusionList.ToArray());
                 }
-                set {
+                set
+                {
                     if (value == null || value.Equals("")) return;
                     exclusionList = value.Split(',').Select(s => s.Trim()).ToList();
                 }
@@ -1565,7 +1664,8 @@ namespace Oxide.Plugins
                         try
                         {
                             daily = parsedEntries.FirstOrDefault(e => e.time == parsedEntries.Where(t => t.valid && t.time <= DateTime.Now.TimeOfDay && t.isDaily).Max(t => t.time));
-                        } catch(Exception)
+                        }
+                        catch (Exception)
                         { // no daily entries
                         }
                         if (daily != null && se == null)
@@ -1588,7 +1688,8 @@ namespace Oxide.Plugins
                         try
                         {
                             daily = parsedEntries.FirstOrDefault(e => e.time == parsedEntries.Where(t => t.valid && t.isDaily).Max(t => t.time));
-                        } catch (Exception)
+                        }
+                        catch (Exception)
                         { // no daily entries
                         }
                         if (daily != null && se == null)
