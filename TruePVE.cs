@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.2", ResourceId = 1789)]
+    [Info("TruePVE", "ignignokt84", "0.9.3", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -488,11 +488,13 @@ namespace Oxide.Plugins
         {
             bool dirty = false;
             foreach (RuleSet rs in data.ruleSets)
+            {
                 if (!data.mappings.ContainsValue(rs.name))
                 {
                     data.mappings[rs.name] = rs.name;
                     dirty = true;
                 }
+            }
             return dirty;
         }
 
@@ -1119,10 +1121,22 @@ namespace Oxide.Plugins
                 List<string> zmloc = new List<string>();
                 if(ZoneManager.Version >= new VersionNumber(3, 0, 1))
                 {
-                    string[] zmlocnew = (string[]) ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
-                    foreach(string s in zmlocnew)
+                    if(entity is BasePlayer)
                     {
-                        zmloc.Add(s);
+                        // BasePlayer fix from chadomat
+                        string[] zmlocplr = (string[]) ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
+                        foreach(string s in zmlocplr)
+                        {
+                            zmloc.Add(s);
+                        }
+                    }
+                    else
+                    {
+                        string[] zmlocent = (string[]) ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
+                        foreach(string s in zmlocent)
+                        {
+                            zmloc.Add(s);
+                        }
                     }
                 }
                 else if(ZoneManager.Version == new VersionNumber(3, 0, 0))
