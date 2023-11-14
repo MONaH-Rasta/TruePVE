@@ -1,4 +1,3 @@
-
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -12,12 +11,11 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.0", ResourceId = 1789)]
+    [Info("TruePVE", "ignignokt84", "0.9.1", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
         #region Variables
-
         static TruePVE Instance;
 
         // config/data container
@@ -37,13 +35,13 @@ namespace Oxide.Plugins
         enum Command { def, sched, trace, usage };
         // valid configuration options
         public enum Option {
-            handleDamage,        // (true)    enable TruePVE damage handling hooks
-            useZones            // (true)    use ZoneManager/LiteZones for zone-specific damage behavior (requires modification of ZoneManager.cs)
+            handleDamage, // (true) enable TruePVE damage handling hooks
+            useZones      // (true) use ZoneManager/LiteZones for zone-specific damage behavior (requires modification of ZoneManager.cs)
         };
         // default values array
         bool[] defaults = {
-            true,    // handleDamage
-            true    // useZones
+            true, // handleDamage
+            true  // useZones
         };
 
         // flags for RuleSets
@@ -63,7 +61,8 @@ namespace Oxide.Plugins
             ProtectedSleepers = 1 << 9,
             TrapsIgnorePlayers = 1 << 10,
             TurretsIgnorePlayers = 1 << 11,
-            CupboardOwnership = 1 << 12
+            CupboardOwnership = 1 << 12,
+            SelfDamage = 1 << 13
         }
         // timer to check for schedule updates
         Timer scheduleUpdateTimer;
@@ -90,15 +89,13 @@ namespace Oxide.Plugins
         float traceTimeout = 300f;
         // trace timeout timer
         Timer traceTimer;
-
         #endregion
 
         #region Lang
-
         // load default messages to Lang
         void LoadDefaultMessages()
         {
-            var messages = new Dictionary<string, string>
+            lang.RegisterMessages(new Dictionary<string, string>
             {
                 {"Prefix", "<color=#FFA500>[ TruePVE ]</color>" },
 
@@ -141,17 +138,14 @@ namespace Oxide.Plugins
                 {"Format_HeaderSize", "14"},
                 {"Format_ErrorColor", "#FF0000"}, // red
                 {"Format_ErrorSize", "12"},
-            };
-            lang.RegisterMessages(messages, this);
+            }, this);
         }
 
         // get message from Lang
         string GetMessage(string key, string userId = null) => lang.GetMessage(key, this, userId);
-
         #endregion
 
         #region Loading/Unloading
-
         // load things
         void Loaded()
         {
@@ -226,11 +220,9 @@ namespace Oxide.Plugins
                 TimerLoop(true);
             serverInitialized = true;
         }
-
         #endregion
 
         #region Command Handling
-
         // delegation method for console commands
         void CommandDelegator(ConsoleSystem.Arg arg)
         {
@@ -429,11 +421,9 @@ namespace Oxide.Plugins
             }
             SendMessage(arg, message, opts);
         }
-
         #endregion
 
         #region Configuration/Data
-
         // load config
         void LoadConfiguration()
         {
@@ -619,11 +609,9 @@ namespace Oxide.Plugins
 
             return true;
         }
-
         #endregion
 
         #region Hooks/Handler Procedures
-
         void OnPlayerInit(BasePlayer player)
         {
             if (data.schedule.enabled && data.schedule.broadcast && currentBroadcastMessage != null)
@@ -650,9 +638,15 @@ namespace Oxide.Plugins
         // determines if an entity is "allowed" to take damage
         bool AllowDamage(BaseEntity entity, HitInfo hitinfo)
         {
-            object extCanTakeDamage = Interface.CallHook("CanEntityTakeDamage", new object[] { entity, hitinfo });
-            if (extCanTakeDamage != null)
-                return (bool) extCanTakeDamage;
+            try
+            {
+                object extCanTakeDamage = Interface.CallHook("CanEntityTakeDamage", new object[] { entity, hitinfo });
+                if(extCanTakeDamage != null)
+                {
+                    return (bool) extCanTakeDamage;
+                }
+            }
+            catch {}
 
             // if default global is not enabled, return true (allow all damage)
             if (currentRuleSet == null || currentRuleSet.IsEmpty() || !currentRuleSet.enabled)
@@ -676,8 +670,12 @@ namespace Oxide.Plugins
             if(entity.ShortPrefabName.Contains("barrel") ||
                entity.ShortPrefabName.Equals("loot_trash") ||
                entity.ShortPrefabName.Equals("giftbox_loot"))
+            {
                 if(!entity.ShortPrefabName.Equals("waterbarrel"))
+                {
                     return true;
+                }
+            }
 
             if (trace)
             {
@@ -710,6 +708,10 @@ namespace Oxide.Plugins
                 }
                 return true;
             }
+
+            // allow anything to hurt itself
+            if (ruleSet.HasFlag(RuleFlags.SelfDamage) && (hitinfo.Initiator == entity))
+                return true;
 
             // Check storage containers and doors for locks
             if ((entity is StorageContainer && ruleSet.HasFlag(RuleFlags.LockedBoxesImmortal)) ||
@@ -1018,11 +1020,9 @@ namespace Oxide.Plugins
             }
             return false;
         }
-
         #endregion
 
         #region Messaging
-
         // send message to player (chat)
         void SendMessage(BasePlayer player, string key, object[] options = null) => SendReply(player, BuildMessage(player, key, options));
 
@@ -1085,11 +1085,9 @@ namespace Oxide.Plugins
 
         // warn that the server is set to PVE mdoe
         void WarnPve() => PrintWarning(GetMessage("Warning_PveMode"));
-
         #endregion
 
         #region Helper Procedures
-
         // is admin
         private bool IsAdmin(BasePlayer player)
         {
@@ -1181,11 +1179,9 @@ namespace Oxide.Plugins
         }
 
         internal void Trace(string message, int indentation = 0) => LogToFile(traceFile, "".PadLeft(indentation, ' ') + message, this);
-
         #endregion
 
         #region Subclasses
-
         // configuration and data storage container
         class TruePVEData
         {
@@ -1578,7 +1574,6 @@ namespace Oxide.Plugins
                 valid = ScheduleTranslator.Translate(this);
             }
         }
-
         #endregion
     }
 }
