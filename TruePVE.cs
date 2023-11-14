@@ -13,9 +13,22 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
+/*
+Fix damage to patrol helicopter when crashing into terrain
+Added `heliturrets cannot hurt players` to default config - you MUST add this to prevent damage if you have `anything can hurt players` rule
+
+{
+    "name": "heliturrets",
+    "members": "turret_attackheli",
+    "exclusions": ""
+},
+
+heliturrets cannot hurt players
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.1.1")]
+    [Info("TruePVE", "nivex", "2.1.2")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -695,6 +708,11 @@ namespace Oxide.Plugins
                 members = "Tugboat"
             });
 
+            config.groups.Add(new EntityGroup("heliturrets")
+            {
+                members = "turret_attackheli"
+            });
+
             // create default ruleset
             RuleSet defaultRuleSet = new RuleSet(config.defaultRuleSet)
             {
@@ -732,6 +750,7 @@ namespace Oxide.Plugins
             defaultRuleSet.AddRule("junkyard cannot hurt anything");
             defaultRuleSet.AddRule("junkyard can hurt cars");
             defaultRuleSet.AddRule("players cannot hurt tugboats");
+            defaultRuleSet.AddRule("heliturrets cannot hurt players");
 
             config.ruleSets.Add(defaultRuleSet); // add ruleset to rulesets list
 
@@ -1006,9 +1025,13 @@ namespace Oxide.Plugins
 
             if (entity is PatrolHelicopter)
             {
-                bool isBlocked = !EvaluateRules(entity, weapon, ruleSet, false);
-                if (trace) Trace($"Target is PatrolHelicopter; {(isBlocked ? "block and return" : "allow and return")}", 1);
-                return !isBlocked;
+                if (weapon is BasePlayer)
+                {
+                    bool isBlocked = !EvaluateRules(entity, weapon, ruleSet, false);
+                    if (trace) Trace($"Target is PatrolHelicopter; {(isBlocked ? "block and return" : "allow and return")}", 1);
+                    return !isBlocked;
+                }
+                return true;
             }
 
             if (weapon?.ShortPrefabName == "maincannonshell" || weapon is BradleyAPC)
