@@ -13,22 +13,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-/*
-Fix damage to patrol helicopter when crashing into terrain
-Added `heliturrets cannot hurt players` to default config - you MUST add this to prevent damage if you have `anything can hurt players` rule
-
-{
-    "name": "heliturrets",
-    "members": "turret_attackheli",
-    "exclusions": ""
-},
-
-heliturrets cannot hurt players
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.1.2")]
+    [Info("TruePVE", "nivex", "2.1.3")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -837,7 +824,10 @@ namespace Oxide.Plugins
         #region Hooks/Handler Procedures
         private void OnPlayerConnected(BasePlayer player)
         {
-            SendReply(player, GetMessage("Prefix") + currentBroadcastMessage);
+            if (config.schedule.broadcast && !string.IsNullOrEmpty(currentBroadcastMessage))
+            {
+                SendReply(player, GetMessage("Prefix") + currentBroadcastMessage);
+            }
         }
 
         private string CurrentRuleSetName() => currentRuleSet?.name;
