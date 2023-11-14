@@ -1,5 +1,4 @@
 using Newtonsoft.Json;
-using Newtonsoft.Json.Converters;
 using Oxide.Core;
 using Oxide.Core.Plugins;
 using Rust;
@@ -7,93 +6,29 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
 /*
-    1.2.0:
-    Hooks:
-        CanEntityBeDamaged now properly blocks damage when returning false for decay damage
-        CanEntityBeTargeted now properly blocks being targeted when returning false
-        CanEntityTrapTrigger now properly blocks triggering the trap when returning false
-
-    Fixed CarsImmunity applying when not added
-    Improved OnEntityTakeDamage hook time by checking for required ruleset flags first, and by removing redundant code
-    Plants can now be harvested if the player is either 1) allowed to build in the area, or 2) owns the planter box
-
-    1.1.95:
-    Added config protection to prevent invalid configs from being reset. Use the message in the server console to debug the error as some json validators fail to detect specific errors!
-    Added IsEnabled API
-    Added CarsImmunity flag - prevent cars from taking damage from collisions
-    Added MiniCannotHurtPlayers flag - prevent mini and scrap from hurting players
-    Added AuthorizedDamageRequiresOwnership flag
-    Added TwigDamageRequiresOwnership flag
-    Added `Allow Killing Sleepers` (false)
-    Trapped OnEntityTakeDamage.KeyNotFoundException
-    
-    1.1.8:
-    Added API - bool ResetRules(string key)
-    Added flag SamSitesIgnorePlayers
-    Fixed issues where players would not be detected while on mounts, allowing certain flags and rules to be bypassed
-
-    1.1.7:
-    Fixed NoTurretDamagePlayer
-    TurretsIgnorePlayers now excludes turrets using instruments
-    TruePVE now negates blocked damage entirely
-        Use CanEntityTakeDamage(BaseEntity entity, HitInfo info) to bypass this
-    Incompatibility with DynamicPVP is still being looked at
-
-    1.1.5:
-    Fix for TurretsIgnorePlayers still ignoring npcs
-    Incompatibility with DynamicPVP is still being looked at
-
-    1.1.4:
-    Added MiniCopterIsImmuneToCollision flag
-    Added null checks to ClockUpdate to prevent NRE, however this does not solve the issue
-    Changed the behavior of TurretsIgnorePlayers to only ignore players, and not npcs. Use TurretsIgnoreScientist to have turrets ignore all npcs
-    Increased the prune layer by 15 meters
-    Increased the minimum distance from monuments by 15 meters
-
-    1.1.3:
-    CanEntityBeTargeted hook now returns null if true
-    CanEntityTrapTrigger hook now returns null if true
-    Possible fix for TimerLoop ClockUpdate.NullReferenceException @Gbutome
-    TurretsIgnorePlayers now checks for an excluded zone @ThePitereq
-
-    1.1.2:    
-    Added hook CanEntityTrapTrigger(BaseTrap trap, BasePlayer player)
-    Added hook CanEntityBeTargeted(BasePlayer player, BaseEntity target)
-    Evaluate rules when minicoper attacks building
-    Added flag TurretsIgnoreScientist @Credits to RFC1920
-    Added flag TrapsIgnoreScientist
-
-    1.1.1:
-    Fixed CanBeTargeted performance issue
-    Fixed HasEmptyMapping.InvalidOperationException
-
-    Credits to RFC1920 for the following:
-        Update some old crufty logging calls (nivex callout)
-        Add new flag, NoTurretDamageScientist. If added to ruleset, turrets will not kill scientist NPCs. Prior to this with the new turrets and turret checks, they weren't killable. To continue with that behavior, set the flag.
-        Add /tpve_enable and tpve.enable to toggle enabling/disabling the plugin
-        Add flag NoHeliDamageQuarry
-        Fix CheckTurretInitiator function so that it only finds weapons in AutoTurrets 
-        Add new ruleset flag, NoTurretDamagePlayer. Perhaps a better way will come soon.
-        Ensure that valid rulesets don't get deleted
-        Add bailout if incoming damage type is decay. Added first pass fix for AddOrUpdateMapping() clearing all but the default ruleset. Probably more work to be done.
+Fixed players not being able to suicide (you can remove SelfDamage flag if you added it only for this issue)
+Added support for TruePVE to be used on PVP servers that want to add PVE zones via Zone Manager
+Added API TruePVE.Call<string>("CurrentRuleSetName");
+Removed no owner check from AuthorizedDamageRequiresOwnership - useful for blocking damage to your unowned mini etc
 */
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "1.2.0")]
+    [Info("TruePVE", "nivex", "2.0.3")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
     {
         #region Variables
-        static TruePVE Instance;
+        private static TruePVE Instance;
 
         // config/data container
-        TruePVEData data = new TruePVEData();
+        private TruePVEData data = new TruePVEData();
 
         // ZoneManager plugin
         [PluginReference]
@@ -106,7 +41,7 @@ namespace Oxide.Plugins
         // usage information string with formatting
         public string usageString;
         // valid commands
-        enum Command { def, sched, trace, usage, enable };
+        private enum Command { def, sched, trace, usage, enable };
         // valid configuration options
         public enum Option
         {
@@ -114,14 +49,10 @@ namespace Oxide.Plugins
             useZones      // (true) use ZoneManager/LiteZones for zone-specific damage behavior (requires modification of ZoneManager.cs)
         };
         // default values array
-        bool[] defaults = {
-            true, // handleDamage
-            true  // useZones
-        };
-
+        
         // flags for RuleSets
         [Flags]
-        enum RuleFlags
+        private enum RuleFlags
         {
             None = 0,
             SuicideBlocked = 1,
@@ -134,51 +65,44 @@ namespace Oxide.Plugins
             LockedDoorsImmortal = 1 << 7,
             AdminsHurtSleepers = 1 << 8,
             ProtectedSleepers = 1 << 9,
-            TrapsIgnorePlayers = 1 << 10,
-            TurretsIgnorePlayers = 1 << 11,
-            CupboardOwnership = 1 << 12,
-            SelfDamage = 1 << 13,
-            TwigDamage = 1 << 14,
-            NoTurretDamagePlayer = 1 << 15,
-            NoHeliDamageQuarry = 1 << 16,
-            NoTurretDamageScientist = 1 << 17,
-            TurretsIgnoreScientist = 1 << 18,
-            TrapsIgnoreScientist = 1 << 19,
-            MiniCopterIsImmuneToCollision = 1 << 20,
-            //HeliCanDamageTwig = 1 << 21,
-            SamSitesIgnorePlayers = 1 << 22,
-            MiniCannotHurtPlayers = 1 << 23,
-            TwigDamageRequiresOwnership = 1 << 24,
-            AuthorizedDamageRequiresOwnership = 1 << 25,
-            CarsImmunity = 1 << 26,
+            CupboardOwnership = 1 << 10,
+            SelfDamage = 1 << 11,
+            TwigDamage = 1 << 12,
+            NoHeliDamageQuarry = 1 << 13,
+            TrapsIgnorePlayers = 1 << 14,
+            TurretsIgnorePlayers = 1 << 15,
+            TurretsIgnoreScientist = 1 << 16,
+            TrapsIgnoreScientist = 1 << 17,
+            SamSitesIgnorePlayers = 1 << 18,
+            TwigDamageRequiresOwnership = 1 << 19,
+            AuthorizedDamageRequiresOwnership = 1 << 20
         }
-
+        //
         // timer to check for schedule updates
-        Timer scheduleUpdateTimer;
+        private Timer scheduleUpdateTimer;
         // current ruleset
-        RuleSet currentRuleSet;
+        private RuleSet currentRuleSet;
         // current broadcast message
-        string currentBroadcastMessage;
+        private string currentBroadcastMessage;
         // internal useZones flag
-        bool useZones = false;
+        private bool useZones = false;
         // constant "any" string for rules
-        const string Any = "any";
+        private const string Any = "any";
         // constant "allzones" string for mappings
-        const string AllZones = "allzones";
-        // flag to prevent certain things from happening before server initialized
-        bool serverInitialized = false;
+        private const string AllZones = "allzones";
+        private bool serverInitialized = false;
         // permission for mapping command
-        string PermCanMap = "truepve.canmap";
+        private const string PermCanMap = "truepve.canmap";
 
         // trace flag
-        bool trace = false;
+        private bool trace = false;
         // tracefile name
-        string traceFile = "ruletrace";
+        private const string traceFile = "ruletrace";
         // auto-disable trace after 300s (5m)
-        float traceTimeout = 300f;
+        private const float traceTimeout = 300f;
         // trace timeout timer
-        Timer traceTimer;
-        bool tpveEnabled = true;
+        private Timer traceTimer;
+        private bool tpveEnabled = true;
         #endregion
 
         #region Lang
@@ -197,11 +121,11 @@ namespace Oxide.Plugins
                 {"Cmd_Usage_map", "Create/remove a mapping entry" },
                 {"Cmd_Usage_trace", "Toggle tracing on/off" },
 
-                {"Warning_PveMode", "Server is set to PVE mode!  TruePVE is designed for PVP mode, and may cause unexpected behavior in PVE mode."},
+                {"Warning_PveMode", "ConVar server.pve is TRUE!  TruePVE is designed for PVP mode, and may cause unexpected behavior in PVE mode."},
                 {"Warning_OldConfig", "Old config detected - moving to {0}" },
                 {"Warning_NoRuleSet", "No RuleSet found for \"{0}\"" },
                 {"Warning_DuplicateRuleSet", "Multiple RuleSets found for \"{0}\"" },
-
+                
                 {"Error_InvalidCommand", "Invalid command" },
                 {"Error_InvalidParameter", "Invalid parameter: {0}"},
                 {"Error_InvalidParamForCmd", "Invalid parameters for command \"{0}\""},
@@ -235,23 +159,27 @@ namespace Oxide.Plugins
         }
 
         // get message from Lang
-        string GetMessage(string key, string userId = null) => lang.GetMessage(key, this, userId);
+        private string GetMessage(string key, string userId = null) => lang.GetMessage(key, this, userId);
         #endregion
 
         #region Loading/Unloading
         // load things
-        void Loaded()
+        private void Loaded()
         {
             Instance = this;
             LoadDefaultMessages();
             string baseCommand = "tpve";
             // register console commands automagically
             foreach (Command command in Enum.GetValues(typeof(Command)))
-                cmd.AddConsoleCommand((baseCommand + "." + command.ToString()), this, "CommandDelegator");
+            {
+                cmd.AddConsoleCommand(baseCommand + "." + command.ToString(), this, nameof(CommandDelegator));
+                //Puts(baseCommand + "." + command.ToString());
+            }
             // register chat commands
-            cmd.AddChatCommand(baseCommand + "_prod", this, "HandleProd");
-            cmd.AddChatCommand(baseCommand + "_enable", this, "EnableToggle");
-            cmd.AddChatCommand(baseCommand, this, "ChatCommandDelegator");
+            cmd.AddChatCommand(baseCommand + "_prod", this, nameof(HandleProd));
+            cmd.AddChatCommand(baseCommand + "_enable", this, nameof(EnableToggle));
+            cmd.AddChatCommand(baseCommand, this, nameof(ChatCommandDelegator));
+
             // build usage string for console (without sizing)
             usageString = WrapColor("orange", GetMessage("Header_Usage")) + "\n" +
                           WrapColor("cyan", $"{baseCommand}.{Command.def.ToString()}") + $" - {GetMessage("Cmd_Usage_def")}{Environment.NewLine}" +
@@ -263,7 +191,7 @@ namespace Oxide.Plugins
         }
 
         // on unloaded
-        void Unload()
+        private void Unload()
         {
             if (scheduleUpdateTimer != null)
                 scheduleUpdateTimer.Destroy();
@@ -271,7 +199,7 @@ namespace Oxide.Plugins
         }
 
         // plugin loaded
-        void OnPluginLoaded(Plugin plugin)
+        private void OnPluginLoaded(Plugin plugin)
         {
             if (plugin.Name == "ZoneManager")
                 ZoneManager = plugin;
@@ -283,7 +211,7 @@ namespace Oxide.Plugins
         }
 
         // plugin unloaded
-        void OnPluginUnloaded(Plugin plugin)
+        private void OnPluginUnloaded(Plugin plugin)
         {
             if (plugin.Name == "ZoneManager")
                 ZoneManager = null;
@@ -295,8 +223,17 @@ namespace Oxide.Plugins
             traceTimer?.Destroy();
         }
 
+        private void Init()
+        {
+            Unsubscribe(nameof(CanBeTargeted));
+            Unsubscribe(nameof(OnEntityTakeDamage));
+            Unsubscribe(nameof(OnPlayerConnected));            
+            Unsubscribe(nameof(OnSamSiteTarget));
+            Unsubscribe(nameof(OnTrapTrigger));
+        }
+
         // server initialized
-        void OnServerInitialized()
+        private void OnServerInitialized()
         {
             // check for server pve setting
             if (ConVar.Server.pve)
@@ -305,20 +242,29 @@ namespace Oxide.Plugins
             LoadConfiguration();
             data.Init();
             currentRuleSet = data.GetDefaultRuleSet();
-            if (currentRuleSet == null)
+            if (currentRuleSet == null) 
                 PrintWarning(GetMessage("Warning_NoRuleSet"), data.defaultRuleSet);
+            if (!data.config.ContainsKey(Option.handleDamage)) data.config[Option.handleDamage] = true;
+            if (!data.config.ContainsKey(Option.useZones)) data.config[Option.useZones] = true;
             useZones = data.config[Option.useZones] && (LiteZones != null || ZoneManager != null);
             if (useZones && data.mappings.Count == 1 && data.mappings.First().Key.Equals(data.defaultRuleSet))
                 useZones = false;
             if (data.schedule.enabled)
                 TimerLoop(true);
-            serverInitialized = true;
+
+            if (currentRuleSet == null) return;
+            Subscribe(nameof(CanBeTargeted));
+            Subscribe(nameof(OnEntityTakeDamage));
+            Subscribe(nameof(OnPlayerConnected));
+            Subscribe(nameof(OnSamSiteTarget));
+            Subscribe(nameof(OnTrapTrigger));
+            serverInitialized = true;            
         }
         #endregion
 
         #region Command Handling
         // delegation method for console commands
-        void CommandDelegator(ConsoleSystem.Arg arg)
+        private void CommandDelegator(ConsoleSystem.Arg arg)
         {
             // return if user doesn't have access to run console command
             if (!HasAccess(arg)) return;
@@ -360,11 +306,12 @@ namespace Oxide.Plugins
             ShowUsage(arg);
         }
 
-        void EnableToggle(BasePlayer player, string command, string[] args)
+        private void EnableToggle(BasePlayer player, string command, string[] args)
         {
             if (!IsAdmin(player))
             {
                 SendMessage(player, "Error_NoPermission");
+                return;
             }
 
             tpveEnabled = !tpveEnabled;
@@ -372,7 +319,7 @@ namespace Oxide.Plugins
         }
 
         // handle setting defaults
-        void HandleDef(ConsoleSystem.Arg arg)
+        private void HandleDef(ConsoleSystem.Arg arg)
         {
             LoadDefaultConfiguration();
             SendMessage(arg, "Notify_DefConfigLoad");
@@ -383,10 +330,13 @@ namespace Oxide.Plugins
         }
 
         // handle prod command (raycast to determine what player is looking at)
-        void HandleProd(BasePlayer player, string command, string[] args)
+        private void HandleProd(BasePlayer player, string command, string[] args)
         {
             if (!IsAdmin(player))
+            {
                 SendMessage(player, "Error_NoPermission");
+                return;
+            }
 
             object entity;
             if (!GetRaycastTarget(player, out entity) || entity == null)
@@ -398,34 +348,29 @@ namespace Oxide.Plugins
         }
 
         // delegation method for chat commands
-        void ChatCommandDelegator(BasePlayer player, string command, string[] args)
+        private void ChatCommandDelegator(BasePlayer player, string command, string[] args)
         {
-            if (!hasPermission(player, PermCanMap))
+            if (!IsAdmin(player) && !permission.UserHasPermission(player.UserIDString, PermCanMap))
             {
                 SendMessage(player, "Error_NoPermission");
                 return;
             }
 
             // assume args[0] is the command (beyond /tpve)
-            if (args != null && args.Length > 0)
+            if (args.Length > 0)
                 command = args[0];
-            // shift arguments
-            if (args != null)
-            {
-                if (args.Length > 1)
-                    args = args.Skip(1).ToArray();
-                else
-                    args = new string[] { };
-            }
 
+            // shift arguments
+            args = args.Length > 1 ? args = args.Skip(1).ToArray() : new string[0];
+            
             string message = "";
             object[] opts = new object[] { };
 
-            if (command == null || command != "map")
+            if (command != "map")
             {
                 message = "Error_InvalidCommand";
             }
-            else if (args == null || args.Length == 0)
+            else if (args.Length == 0)
             {
                 message = "Error_InvalidParamForCmd";
                 opts = new object[] { command };
@@ -436,9 +381,7 @@ namespace Oxide.Plugins
                 // args[1] if exists should be target ruleset or "exclude"
                 // if args[1] is empty, delete mapping
                 string from = args[0];
-                string to = null;
-                if (args.Length == 2)
-                    to = args[1];
+                string to = args.Length == 2 ? args[1] : null;
 
                 if (to != null && !data.ruleSets.Select(r => r.name).Contains(to) && to != "exclude")
                 {
@@ -487,22 +430,24 @@ namespace Oxide.Plugins
                     }
 
                     if (dirty)
-                        // save changes to config file
-                        SaveData();
+                    {
+                        SaveData(); // save changes to config file
+                    }
                 }
             }
+
             SendMessage(player, message, opts);
         }
 
         // handles schedule enable/disable
-        void HandleScheduleSet(ConsoleSystem.Arg arg)
+        private void HandleScheduleSet(ConsoleSystem.Arg arg)
         {
-            if (arg == null || arg.Args == null || arg.Args.Length == 0)
+            if (arg == null || !arg.HasArgs())
             {
                 SendMessage(arg, "Error_InvalidParamForCmd");
                 return;
             }
-            string message = "";
+            string message = string.Empty;
             if (!data.schedule.valid)
             {
                 message = "Notify_InvalidSchedule";
@@ -523,7 +468,7 @@ namespace Oxide.Plugins
                 message = "Notify_SchedSetDisabled";
             }
             object[] opts = new object[] { };
-            if (message == "")
+            if (message == string.Empty)
             {
                 message = "Error_InvalidParameter";
                 opts = new object[] { arg.Args[0] };
@@ -534,28 +479,25 @@ namespace Oxide.Plugins
 
         #region Configuration/Data
         // load config
-        void LoadConfiguration()
+        private void LoadConfiguration()
         {
             CheckVersion();
             Config.Settings.NullValueHandling = NullValueHandling.Include;
             bool dirty = false;
             try
             {
-                data = Config.ReadObject<TruePVEData>() ?? null;
+                data = Config.ReadObject<TruePVEData>();
             }
-            catch (JsonException ex)
+            catch (Exception ex)
             {
+                Puts(ex.Message); 
                 Puts(ex.StackTrace);
-                Puts(ex.Message);
                 return;
             }
-            catch (Exception)
-            {
-                data = new TruePVEData();
-            }
             if (data == null || data.schedule == null)
+            {
                 LoadDefaultConfig();
-
+            }
             dirty |= CheckConfig();
             dirty |= CheckData();
             // check config version, update version to current version
@@ -565,32 +507,36 @@ namespace Oxide.Plugins
                 dirty |= true;
             }
             if (dirty)
+            {
                 SaveData();
+            }
         }
 
         // save data
-        void SaveData() => Config.WriteObject(data);
+        private void SaveData() => Config.WriteObject(data);
 
         // verify/update configuration
-        bool CheckConfig()
+        private bool CheckConfig()
         {
             bool dirty = false;
             foreach (Option option in Enum.GetValues(typeof(Option)))
+            {
                 if (!data.config.ContainsKey(option))
                 {
-                    data.config[option] = defaults[(int)option];
-                    dirty = true;
+                    data.config[option] = dirty = true;
                 }
+            }
             return dirty;
         }
 
         // check rulesets and groups
-        bool CheckData()
+        private bool CheckData()
         {
             bool dirty = false;
-            if ((data.ruleSets == null || data.ruleSets.Count == 0) ||
-                (data.groups == null || data.groups.Count == 0))
+            if ((data.ruleSets == null || data.ruleSets.Count == 0) || (data.groups == null || data.groups.Count == 0))
+            {
                 dirty = LoadDefaultData();
+            }
             if (data.schedule == null)
             {
                 data.schedule = new Schedule();
@@ -601,7 +547,7 @@ namespace Oxide.Plugins
         }
 
         // rebuild mappings
-        bool CheckMappings()
+        private bool CheckMappings()
         {
             bool dirty = false;
             foreach (RuleSet rs in data.ruleSets)
@@ -618,14 +564,16 @@ namespace Oxide.Plugins
         // default config creation
         protected override void LoadDefaultConfig()
         {
-            data = new TruePVEData();
-            data.configVersion = Version.ToString();
+            data = new TruePVEData
+            {
+                configVersion = Version.ToString()
+            };
             LoadDefaultConfiguration();
             LoadDefaultData();
             SaveData();
         }
 
-        void CheckVersion()
+        private void CheckVersion()
         {
             if (Config["configVersion"] == null) return;
             Version config = new Version(Config["configVersion"].ToString());
@@ -639,15 +587,17 @@ namespace Oxide.Plugins
         }
 
         // populates default configuration entries
-        bool LoadDefaultConfiguration()
+        private bool LoadDefaultConfiguration()
         {
             foreach (Option option in Enum.GetValues(typeof(Option)))
-                data.config[option] = defaults[(int)option];
+            {
+                data.config[option] = true;
+            }
             return true;
         }
 
         // load default data to mappings, rulesets, and groups
-        bool LoadDefaultData()
+        private bool LoadDefaultData()
         {
             data.mappings.Clear();
             data.ruleSets.Clear();
@@ -656,88 +606,142 @@ namespace Oxide.Plugins
             data.defaultRuleSet = "default";
 
             // build groups first
-            EntityGroup dispenser = new EntityGroup("dispensers");
-            dispenser.Add(typeof(BaseCorpse).Name);
-            dispenser.Add(typeof(HelicopterDebris).Name);
-            data.groups.Add(dispenser);
+            data.groups.Add(new EntityGroup("barricades")
+            {
+                members = "Barricade, icewall, GraveYardFence", // "barricade.cover.wood, door_barricade_a, door_barricade_a_large, door_barricade_b, door_barricade_dbl_a, door_barricade_dbl_a_large, door_barricade_dbl_b, door_barricade_dbl_b_large",
+                exclusions = "barricade.concrete, barricade.sandbags, barricade.metal, barricade.stone, barricade.wood, barricade.woodwire"
+            });
 
-            EntityGroup players = new EntityGroup("players");
-            players.Add(typeof(BasePlayer).Name);
-            data.groups.Add(players);
+            data.groups.Add(new EntityGroup("dispensers")
+            {
+                members = "BaseCorpse, HelicopterDebris, PlayerCorpse, NPCPlayerCorpse, HorseCorpse"
+            });
 
-            EntityGroup traps = new EntityGroup("traps");
-            traps.Add(typeof(AutoTurret).Name);
-            traps.Add(typeof(BearTrap).Name);
-            traps.Add(typeof(FlameTurret).Name);
-            traps.Add(typeof(Landmine).Name);
-            traps.Add(typeof(GunTrap).Name);
-            traps.Add(typeof(ReactiveTarget).Name); // include targets with traps, since behavior is the same
-            traps.Add("spikes.floor");
-            data.groups.Add(traps);
+            data.groups.Add(new EntityGroup("fire")
+            {
+                members = "FireBall, FlameExplosive, FlameThrower, BaseOven, FlameTurret, rocket_heli_napalm, napalm, oilfireball2"
+            });
 
-            EntityGroup barricades = new EntityGroup("barricades");
-            barricades.Add(typeof(Barricade).Name);
-            data.groups.Add(barricades);
+            data.groups.Add(new EntityGroup("guards")
+            {
+                members = "bandit_guard, scientistpeacekeeper, sentry.scientist.static"
+            });
 
-            EntityGroup highwalls = new EntityGroup("highwalls");
-            highwalls.Add("wall.external.high.stone");
-            highwalls.Add("wall.external.high.wood");
-            highwalls.Add("gates.external.high.wood");
-            highwalls.Add("gates.external.high.wood");
-            data.groups.Add(highwalls);
+            data.groups.Add(new EntityGroup("heli")
+            {
+                members = "BaseHelicopter"
+            });
 
-            EntityGroup heli = new EntityGroup("heli");
-            heli.Add(typeof(BaseHelicopter).Name);
-            data.groups.Add(heli);
+            data.groups.Add(new EntityGroup("highwalls")
+            {
+                members = "SimpleBuildingBlock, wall.external.high.ice, gates.external.high.stone, gates.external.high.wood"
+            });
 
-            EntityGroup npcs = new EntityGroup("npcs");
-            npcs.Add(typeof(NPCPlayerApex).Name);
-            npcs.Add(typeof(BradleyAPC).Name);
-            data.groups.Add(npcs);
+            data.groups.Add(new EntityGroup("ridablehorses")
+            {
+                members = "RidableHorse"
+            });
 
-            EntityGroup fire = new EntityGroup("fire"); ;
-            fire.Add(typeof(FireBall).Name);
-            data.groups.Add(fire);
+            data.groups.Add(new EntityGroup("cars")
+            {
+                members = "BasicCar, ModularCar, BaseModularVehicle, BaseVehicleModule, VehicleModuleEngine, VehicleModuleSeating, VehicleModuleStorage, VehicleModuleTaxi, ModularCarSeat"
+            });
 
-            EntityGroup resources = new EntityGroup("resources");
-            resources.Add(typeof(ResourceEntity).Name);
-            resources.Add(typeof(TreeEntity).Name);
-            resources.Add(typeof(OreResourceEntity).Name);
-            data.groups.Add(resources);
+            data.groups.Add(new EntityGroup("mini")
+            {
+                members = "MiniCopter"
+            });
+
+            data.groups.Add(new EntityGroup("scrapheli")
+            {
+                members = "ScrapTransportHelicopter"
+            });
+
+            data.groups.Add(new EntityGroup("ch47")
+            {
+                members = "ch47.entity"
+            });
+
+            data.groups.Add(new EntityGroup("npcs")
+            {
+                members = "ch47scientists.entity, BradleyAPC, HTNAnimal, HTNPlayer, HumanNPC, NPCMurderer, NPCPlayer, Scientist, ScientistNPC, Zombie"
+            });
+
+            data.groups.Add(new EntityGroup("players")
+            {
+                members = "BasePlayer"
+            });
+
+            data.groups.Add(new EntityGroup("resources")
+            {
+                members = "ResourceEntity, TreeEntity, OreResourceEntity, LootContainer",
+                exclusions = "hobobarrel.deployed"
+            });
+
+            data.groups.Add(new EntityGroup("samsites")
+            {
+                members = "sam_site_turret_deployed",
+                exclusions = "sam_static"
+            });
+
+            data.groups.Add(new EntityGroup("traps")
+            {
+                members = "AutoTurret, BearTrap, FlameTurret, Landmine, GunTrap, ReactiveTarget, TeslaCoil, spikes.floor"
+            });
 
             // create default ruleset
-            RuleSet defaultRuleSet = new RuleSet(data.defaultRuleSet);
-            defaultRuleSet.flags = RuleFlags.HumanNPCDamage | RuleFlags.LockedBoxesImmortal | RuleFlags.LockedDoorsImmortal;
-
+            RuleSet defaultRuleSet = new RuleSet(data.defaultRuleSet)
+            {
+                _flags = RuleFlags.AuthorizedDamage | RuleFlags.HumanNPCDamage | RuleFlags.LockedBoxesImmortal | RuleFlags.LockedDoorsImmortal | RuleFlags.SamSitesIgnorePlayers | RuleFlags.TrapsIgnorePlayers | RuleFlags.TurretsIgnorePlayers,
+                flags = "AuthorizedDamage, HumanNPCDamage, LockedBoxesImmortal, LockedDoorsImmortal, SamSitesIgnorePlayers, TrapsIgnorePlayers, TurretsIgnorePlayers"
+            };
+            
             // create rules and add to ruleset
-            defaultRuleSet.AddRule("anything can hurt " + dispenser.name); // anything hurts dispensers
-            defaultRuleSet.AddRule("anything can hurt " + players.name); // anything hurts players
-            defaultRuleSet.AddRule(players.name + " cannot hurt " + players.name); // players cannot hurt other players
-            defaultRuleSet.AddRule("anything can hurt " + traps.name); // anything hurts traps
-            defaultRuleSet.AddRule(traps.name + " cannot hurt " + players.name); // traps cannot hurt players
-            defaultRuleSet.AddRule(players.name + " can hurt " + barricades.name); // players can hurt barricades
-            defaultRuleSet.AddRule(barricades.name + " cannot hurt " + players.name); // barricades cannot hurt players
-            defaultRuleSet.AddRule(highwalls.name + " cannot hurt " + players.name); // highwalls cannot hurt players
-            defaultRuleSet.AddRule("anything can hurt " + heli.name); // anything can hurt heli
-            defaultRuleSet.AddRule("anything can hurt " + npcs.name); // anything can hurt npcs
-            defaultRuleSet.AddRule(fire.name + " cannot hurt " + players.name); // fire cannot hurt players
-            defaultRuleSet.AddRule("anything can hurt " + resources.name); // anything can hurt resources (gather)
+            defaultRuleSet.AddRule("anything can hurt dispensers");
+            defaultRuleSet.AddRule("anything can hurt resources");
+            defaultRuleSet.AddRule("anything can hurt barricades");
+            defaultRuleSet.AddRule("anything can hurt traps");
+            defaultRuleSet.AddRule("anything can hurt heli");
+            defaultRuleSet.AddRule("anything can hurt npcs");
+            defaultRuleSet.AddRule("anything can hurt players");
+            defaultRuleSet.AddRule("nothing can hurt ch47");
+            defaultRuleSet.AddRule("nothing can hurt cars");
+            defaultRuleSet.AddRule("nothing can hurt mini");
+            defaultRuleSet.AddRule("nothing can hurt guards");
+            defaultRuleSet.AddRule("nothing can hurt ridablehorses");
+            defaultRuleSet.AddRule("cars cannot hurt anything");
+            defaultRuleSet.AddRule("mini cannot hurt anything");
+            defaultRuleSet.AddRule("ch47 cannot hurt anything");
+            defaultRuleSet.AddRule("scrapheli cannot hurt anything");
+            defaultRuleSet.AddRule("players cannot hurt players");
+            defaultRuleSet.AddRule("players cannot hurt traps");
+            defaultRuleSet.AddRule("guards cannot hurt players");
+            defaultRuleSet.AddRule("fire cannot hurt players");
+            defaultRuleSet.AddRule("traps cannot hurt players");
+            defaultRuleSet.AddRule("highwalls cannot hurt players");
+            defaultRuleSet.AddRule("barricades cannot hurt players");
+            defaultRuleSet.AddRule("mini cannot hurt mini");
+            defaultRuleSet.AddRule("npcs can hurt players");
 
             data.ruleSets.Add(defaultRuleSet); // add ruleset to rulesets list
 
             data.mappings[data.defaultRuleSet] = data.defaultRuleSet; // create mapping for ruleset
-
+            
             return true;
         }
 
-        bool ResetRules(string key)
+        private bool ResetRules(string key)
         {
-            if (!serverInitialized) return false;
-            if (string.IsNullOrEmpty(key)) return false;
+            if (!serverInitialized || string.IsNullOrEmpty(key))
+            {
+                return false;
+            }
+
             string old = data.defaultRuleSet;
 
             data.defaultRuleSet = key;
             currentRuleSet = data.GetDefaultRuleSet();
+
             if (currentRuleSet == null)
             {
                 data.defaultRuleSet = old;
@@ -750,19 +754,59 @@ namespace Oxide.Plugins
         #endregion
 
         #region Hooks/Handler Procedures
-        void OnPlayerConnected(BasePlayer player)
+        private void OnPlayerConnected(BasePlayer player)
         {
             if (data.schedule.enabled && data.schedule.broadcast && currentBroadcastMessage != null)
+            {
                 SendReply(player, GetMessage("Prefix") + currentBroadcastMessage);
+            }
         }
 
+        private string CurrentRuleSetName() => currentRuleSet.name;
         private bool IsEnabled() => tpveEnabled;
-
+        private void Trace(string message, int indentation = 0) 
+        {
+            sb.AppendLine("".PadLeft(indentation, ' ') + message);
+        }
+        private void LogTrace()
+        {
+            LogToFile(traceFile, sb.ToString(), this);
+            sb.Length = 0;
+        }
+        private StringBuilder sb = new StringBuilder();
         // handle damage - if another mod must override TruePVE damages or take priority,
         // set handleDamage to false and reference HandleDamage from the other mod(s)
-        object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitInfo)
+        private object OnEntityTakeDamage(ResourceEntity entity, HitInfo hitInfo)
         {
-            if (entity == null || hitInfo == null) return null;
+            // if default global is not enabled, return true (allow all damage)
+            if (hitInfo == null || currentRuleSet == null || currentRuleSet.IsEmpty() || !currentRuleSet.enabled)
+            {
+                return null;
+            }
+
+            // get entity and initiator locations (zones)
+            List<string> entityLocations = GetLocationKeys(entity);
+            List<string> initiatorLocations = GetLocationKeys(hitInfo.Initiator);
+            // check for exclusion zones (zones with no rules mapped)
+            if (CheckExclusion(entityLocations, initiatorLocations, trace))
+            {
+                if (trace) Trace("Exclusion found; allow and return", 1);
+                return null;
+            }
+
+            if (trace) Trace("No exclusion found - looking up RuleSet...", 1);
+            // process location rules
+            RuleSet ruleSet = GetRuleSet(entityLocations, initiatorLocations);
+
+            return EvaluateRules(entity, hitInfo, ruleSet) ? (object)null : true;
+        }
+        
+        private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitInfo)
+        {
+            if (entity == null || hitInfo == null || AllowKillingSleepers(entity))
+            {
+                return null;
+            }
 
             object extCanTakeDamage = Interface.CallHook("CanEntityTakeDamage", new object[] { entity, hitInfo });
 
@@ -772,47 +816,65 @@ namespace Oxide.Plugins
                 {
                     return null;
                 }
-
+                
                 hitInfo.damageTypes = new DamageTypeList();
                 return true;
             }
-
-            if (!tpveEnabled || hitInfo.damageTypes.Has(DamageType.Decay)) return null;
-            try { if (data.config.ContainsKey(Option.handleDamage) && !data.config[Option.handleDamage]) return null; } catch { }
-            if (data.AllowKillingSleepers && entity is BasePlayer && entity.ToPlayer().IsSleeping()) return null;
-            var handleDamage = HandleDamage(entity, hitInfo);
-            if (handleDamage is bool)
+            
+            if (!tpveEnabled || hitInfo.damageTypes.Has(DamageType.Decay) || !OptionHandleDamage())
             {
-                hitInfo.damageTypes = new DamageTypeList();
+                return null;
             }
+            
+            if (!AllowDamage(entity, hitInfo))
+            {
+                if (trace) LogTrace();
+                hitInfo.damageTypes = new DamageTypeList();
+                return true;
+            }
+            
+            if (trace) LogTrace();
+            return null;
+        }
+
+        private bool OptionHandleDamage()
+        {
+            bool handleDamage;
+            if (!data.config.TryGetValue(Option.handleDamage, out handleDamage))
+            {
+                return true;
+            }
+
             return handleDamage;
         }
 
-        // handle damage
-        object HandleDamage(BaseCombatEntity entity, HitInfo hitInfo)
+        private bool AllowKillingSleepers(BaseCombatEntity entity)
         {
-            if (!AllowDamage(entity, hitInfo))
-                return true;
-
-            return null;
+            return data.AllowKillingSleepers && entity is BasePlayer && entity.ToPlayer().IsSleeping();
         }
-        // determines if an entity is "allowed" to take damage
-        bool AllowDamage(BaseEntity entity, HitInfo hitInfo)
-        {
-            // if default global is not enabled, return true (allow all damage)
-            if (currentRuleSet == null || currentRuleSet.IsEmpty() || !currentRuleSet.enabled)
-                return true;
 
-            // allow NPCs to take damage
-            if (entity is BaseNpc)
+        // determines if an entity is "allowed" to take damage
+        private bool AllowDamage(BaseCombatEntity entity, HitInfo hitInfo)
+        {
+            if (trace)
+            {
+                sb.Length = 0;
+            }
+
+            // if default global is not enabled or entity is npc, allow all damage
+            if (currentRuleSet == null || currentRuleSet.IsEmpty() || !currentRuleSet.enabled || entity is BaseNpc)
+            {
                 return true;
+            }
 
             // allow damage to door barricades and covers
             if (entity is Barricade && (entity.ShortPrefabName.Contains("door_barricade") || entity.ShortPrefabName.Contains("cover")))
+            {
                 return true;
+            }
 
-            // if entity is a barrel, trash can, or giftbox, allow damage (exclude water barrels)
-            if (!entity.ShortPrefabName.Equals("waterbarrel"))
+            // if entity is a barrel, trash can, or giftbox, allow damage (exclude water and hobo barrels)
+            if (!entity.ShortPrefabName.Equals("waterbarrel") && entity.prefabID != 1748062128)
             {
                 if (entity.ShortPrefabName.Contains("barrel") || entity.ShortPrefabName.Equals("loot_trash") || entity.ShortPrefabName.Equals("giftbox_loot"))
                 {
@@ -820,81 +882,35 @@ namespace Oxide.Plugins
                 }
             }
 
+            var weapon = hitInfo.Initiator ?? hitInfo.Weapon ?? hitInfo.WeaponPrefab;
+            //hitInfo.ProjectilePrefab.sourceWeaponPrefab
             if (trace)
             {
                 // Sometimes the initiator is not the attacker (turrets)
-                try
-                {
-                    Trace("======================" + Environment.NewLine +
-                      "==  STARTING TRACE  ==" + Environment.NewLine +
-                      "==  " + DateTime.Now.ToString("HH:mm:ss.fffff") + "  ==" + Environment.NewLine +
-                      "======================");
-                    Trace($"From: {hitInfo.Initiator.GetType().Name}, {hitInfo.Initiator.ShortPrefabName}", 1);
-                    Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
-                }
-                catch
-                {
-                    Trace("======================" + Environment.NewLine +
-                      "==  STARTING TRACE  ==" + Environment.NewLine +
-                      "==  " + DateTime.Now.ToString("HH:mm:ss.fffff") + "  ==" + Environment.NewLine +
-                      "======================");
-                    Trace($"From: {hitInfo.WeaponPrefab.GetType().Name}, {hitInfo.WeaponPrefab.ShortPrefabName}", 1);
-                    Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
-                }
+                Trace("======================" + Environment.NewLine +
+                  "==  STARTING TRACE  ==" + Environment.NewLine +
+                  "==  " + DateTime.Now.ToString("HH:mm:ss.fffff") + "  ==" + Environment.NewLine +
+                  "======================");
+                Trace($"From: {weapon?.GetType().Name ?? "Unknown_Weapon"}, {weapon?.ShortPrefabName ?? "Unknown_Prefab"}", 1);
+                Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
             }
-
+            
             // get entity and initiator locations (zones)
             List<string> entityLocations = GetLocationKeys(entity);
-            List<string> initiatorLocations = GetLocationKeys(hitInfo.Initiator);
-            
+            List<string> initiatorLocations = GetLocationKeys(weapon);
             // check for exclusion zones (zones with no rules mapped)
+            if (CheckExclusion(entityLocations, initiatorLocations, trace))
+            {
+                if (trace) Trace("Exclusion found; allow and return", 1);
+                return true;
+            }
+            
             if (trace) Trace("No exclusion found - looking up RuleSet...", 1);
             
             // process location rules
             RuleSet ruleSet = GetRuleSet(entityLocations, initiatorLocations);
+
             if (trace) Trace($"Using RuleSet \"{ruleSet.name}\"", 1);
-
-            if (ruleSet.HasFlag(RuleFlags.CarsImmunity)) 
-            {
-                if (entity is ModularCar || entity is BasicCar || hitInfo.Initiator is ModularCar || hitInfo.Initiator is BasicCar || entity.PrefabName.Contains("modularcar") || hitInfo.Initiator != null && hitInfo.Initiator.PrefabName.Contains("modularcar"))
-                {
-                    if (trace) Trace("Car had a collision; block and return", 1);
-                    return false;
-                }
-            }
-
-            if (CheckExclusion(entityLocations, initiatorLocations))
-            {
-                return true;
-            }
-
-            if (ruleSet.HasFlag(RuleFlags.MiniCopterIsImmuneToCollision) && entity is MiniCopter && hitInfo.Initiator == entity)
-            {
-                if (trace) Trace("Minicopter had a collision; block and return", 1);
-                return false;
-            }
-
-            if (ruleSet.HasFlag(RuleFlags.MiniCannotHurtPlayers) && entity is BasePlayer && hitInfo.Initiator is MiniCopter)
-            {
-                if (trace) Trace("Initiator is minicopter, and target is player; block and return", 1);
-                return false;
-            }
-
-            // handle suicide
-            if (hitInfo.damageTypes?.Get(DamageType.Suicide) > 0)
-            {
-                if (trace) Trace($"DamageType is suicide; blocked? { (ruleSet.HasFlag(RuleFlags.SuicideBlocked) ? "true; block and return" : "false; continue processing") }", 1);
-                if (ruleSet.HasFlag(RuleFlags.SuicideBlocked))
-                {
-                    SendMessage(entity as BasePlayer, "Error_NoSuicide");
-                    return false;
-                }
-                return true;
-            }
-
-            // allow anything to hurt itself
-            if (ruleSet.HasFlag(RuleFlags.SelfDamage) && hitInfo.Initiator == entity)
-                return true;
 
             // Check storage containers and doors for locks
             if (ruleSet.HasFlag(RuleFlags.LockedBoxesImmortal) && entity is StorageContainer || ruleSet.HasFlag(RuleFlags.LockedDoorsImmortal) && entity is Door)
@@ -902,22 +918,17 @@ namespace Oxide.Plugins
                 // check for lock
                 object hurt = CheckLock(ruleSet, entity, hitInfo);
                 if (trace) Trace($"Door/StorageContainer detected with immortal flag; lock check results: { (hurt == null ? "null (no lock or unlocked); continue checks" : (bool)hurt ? "allow and return" : "block and return") }", 1);
-                if (hurt != null)
+                if (hurt is bool)
+                {
                     return (bool)hurt;
+                }
             }
 
             // check heli and turret
             object heli = CheckHeliInitiator(ruleSet, hitInfo);
 
-            if (heli != null)
+            if (heli is bool)
             {
-                /*if (entity is BuildingBlock && ruleSet.HasFlag(RuleFlags.HeliCanDamageTwig))
-                {
-                    var block = entity as BuildingBlock;
-
-                    if (trace) Trace($"Initiator is heli, and target is twig; flag check results: { (ruleSet.HasFlag(RuleFlags.HeliCanDamageTwig) ? "flag set; allow and return" : "flag not set; block and return") }", 1);
-                    return block.grade == BuildingGrade.Enum.Twigs;
-                }*/
                 if (entity is BasePlayer)
                 {
                     if (trace) Trace($"Initiator is heli, and target is player; flag check results: { (ruleSet.HasFlag(RuleFlags.NoHeliDamagePlayer) ? "flag set; block and return" : "flag not set; allow and return") }", 1);
@@ -929,31 +940,33 @@ namespace Oxide.Plugins
                     return !ruleSet.HasFlag(RuleFlags.NoHeliDamageQuarry);
                 }
                 if (trace) Trace($"Initiator is heli, target is non-player; results: { ((bool)heli ? "allow and return" : "block and return") }", 1);
+                //return EvaluateRules(entity, weapon, ruleSet);
                 return (bool)heli;
             }
-
-            object turret = CheckTurretInitiator(ruleSet, hitInfo);
-
-            if (turret != null)
-            {
-                if (entity is Scientist)
-                {
-                    if (trace) Trace($"Initiator is turret, and target is scientist; flag check results: { (ruleSet.HasFlag(RuleFlags.NoTurretDamageScientist) ? "flag set; block and return" : "flag not set; allow and return") }", 1);
-                    return !ruleSet.HasFlag(RuleFlags.NoTurretDamageScientist);
-                }
-                if (entity is BasePlayer)
-                {
-                    if (trace) Trace($"Initiator is turret, and target is player; flag check results: { (ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer) ? "flag set; block and return" : "flag not set; allow and return") }", 1);
-                    return !ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer);
-                }
-                if (trace) Trace($"Initiator is turret, target is non-player; results: { ((bool)turret ? "allow and return" : "block and return") }", 1);
-                return (bool)turret;
-            }
-
-            // after heli and turret check, return true if initiator is null
+            
+            // after heli check, return true if initiator is null
             if (hitInfo.Initiator == null)
             {
                 if (trace) Trace("Initiator empty; allow and return", 1);
+                return true;
+            }
+            
+            // handle suicide
+            if (hitInfo.damageTypes?.Get(DamageType.Suicide) > 0 && !entity.IsNpc && entity is BasePlayer)
+            {
+                if (trace) Trace($"DamageType is suicide; blocked? { (ruleSet.HasFlag(RuleFlags.SuicideBlocked) ? "true; block and return" : "false; allow and return") }", 1);
+                if (ruleSet.HasFlag(RuleFlags.SuicideBlocked))
+                {
+                    SendMessage(entity as BasePlayer, "Error_NoSuicide");
+                    return false;
+                }
+                return true;
+            }
+
+            // allow players to hurt themselves
+            if (ruleSet.HasFlag(RuleFlags.SelfDamage) && !entity.IsNpc && hitInfo.Initiator == entity && entity is BasePlayer)
+            {
+                if (trace) Trace($"SelfDamage flag; player inflicted damage to self; allow and return", 1);
                 return true;
             }
 
@@ -962,7 +975,7 @@ namespace Oxide.Plugins
                 if (trace) Trace("Initiator is minicopter, target is building; evaluate and return", 1);
                 return EvaluateRules(entity, hitInfo, ruleSet);
             }
-
+            
             if (hitInfo.Initiator is BaseNpc)
             {
                 // check for sleeper protection - return false if sleeper protection is on (true)
@@ -975,17 +988,27 @@ namespace Oxide.Plugins
                 if (trace) Trace("Initiator is NPC animal; allow and return", 1);
                 return true; // allow NPC damage to other entities if sleeper protection is off
             }
-
+            
             var attacker = hitInfo.Initiator as BasePlayer;
-
+            
             if (attacker.IsValid())
             {
-                if (entity is BaseRidableAnimal)
+                if (attacker.isMounted)
                 {
-                    return !entity.OwnerID.IsSteamId();
+                    if (!EvaluateRules(entity, attacker.GetMounted(), ruleSet))
+                    {
+                        return false;
+                    }
                 }
-
-                if (entity is GrowableEntity)
+                
+                if (entity is AdvancedChristmasLights)
+                {
+                    if (entity.OwnerID == 0)
+                    {
+                        return attacker.CanBuild();
+                    }
+                }
+                else if (entity is GrowableEntity)
                 {
                     if (attacker.CanBuild())
                     {
@@ -997,16 +1020,58 @@ namespace Oxide.Plugins
 
                     return planter == null || !planter.OwnerID.IsSteamId() || planter.OwnerID == attacker.userID;
                 }
-
-                // ignore checks if authorized damage enabled (except for players)
-                if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !(entity is BasePlayer))
+                else if (entity is BuildingBlock)
                 {
-                    if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && entity.OwnerID.IsSteamId() && entity.OwnerID != attacker.userID)
+                    var block = entity as BuildingBlock;
+
+                    if (block.grade == BuildingGrade.Enum.Twigs)
+                    {
+                        if (ruleSet.HasFlag(RuleFlags.TwigDamageRequiresOwnership)) // Allow twig damage by owner or anyone authed if ruleset flag is set
+                        {
+                            if (entity.OwnerID == attacker.userID)
+                            {
+                                return true;
+                            }
+
+                            return attacker.IsBuildingAuthed(entity.transform.position, entity.transform.rotation, entity.bounds);
+                        }
+
+                        if (ruleSet.HasFlag(RuleFlags.TwigDamage)) // Allow twig damage by anyone if ruleset flag is set
+                        {
+                            return true;
+                        }
+                    }
+                }
+                
+                if (entity is BasePlayer)
+                {
+                    // allow sleeper damage by admins if configured
+                    if (ruleSet.HasFlag(RuleFlags.AdminsHurtSleepers))
+                    {
+                        if ((entity as BasePlayer).IsSleeping() && IsAdmin(attacker))
+                        {
+                            if (trace) Trace("Initiator is admin player and target is sleeping player, with AdminsHurtSleepers flag set; allow and return", 1);
+                            return true;
+                        }
+                    }
+
+                    // allow Human NPC damage if configured
+                    if (ruleSet.HasFlag(RuleFlags.HumanNPCDamage))
+                    {
+                        if (IsHumanNPC(attacker) || IsHumanNPC(entity as BasePlayer))
+                        {
+                            if (trace) Trace("Initiator or target is HumanNPC, with HumanNPCDamage flag set; allow and return", 1);
+                            return true;
+                        }
+                    }
+                }
+                else if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !entity.IsNpc) // ignore checks if authorized damage enabled (except for players and npcs)
+                {
+                    if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && entity.OwnerID != attacker.userID)
                     {
                         if (trace) Trace("Initiator is player who does not own non-player target; block and return", 1);
                         return false;
                     }
-
                     if (CheckAuthorized(entity, attacker, ruleSet))
                     {
                         if (entity is SamSite)
@@ -1018,194 +1083,82 @@ namespace Oxide.Plugins
                         return true;
                     }
                 }
-
-                // allow sleeper damage by admins if configured
-                if (ruleSet.HasFlag(RuleFlags.AdminsHurtSleepers) && entity is BasePlayer)
-                {
-                    if ((entity as BasePlayer).IsSleeping() && IsAdmin(attacker))
-                    {
-                        if (trace) Trace("Initiator is admin player and target is sleeping player, with AdminsHurtSleepers flag set; allow and return", 1);
-                        return true;
-                    }
-                }
-
-                // allow Human NPC damage if configured
-                if (ruleSet.HasFlag(RuleFlags.HumanNPCDamage) && entity is BasePlayer)
-                {
-                    if (IsHumanNPC(entity as BasePlayer) || IsHumanNPC(attacker))
-                    {
-                        if (trace) Trace("Initiator or target is HumanNPC, with HumanNPCDamage flag set; allow and return", 1);
-                        return true;
-                    }
-                }
             }
-
+            
             if (trace) Trace("No match in pre-checks; evaluating RuleSet rules...", 1);
             return EvaluateRules(entity, hitInfo, ruleSet);
         }
 
         // process rules to determine whether to allow damage
-        bool EvaluateRules(BaseEntity entity, BaseEntity attacker, RuleSet ruleSet)
+        private bool EvaluateRules(BaseEntity entity, BaseEntity attacker, RuleSet ruleSet)
         {
             List<string> e0Groups = data.ResolveEntityGroups(attacker);
             List<string> e1Groups = data.ResolveEntityGroups(entity);
+
             if (trace)
             {
-                Trace($"Initator EntityGroup matches: { (e0Groups.Count == 0 ? "none" : string.Join(", ", e0Groups.ToArray())) }", 2);
-                Trace($"Target EntityGroup matches: { (e1Groups.Count == 0 ? "none" : string.Join(", ", e1Groups.ToArray())) }", 2);
+                Trace($"Initator EntityGroup matches: { (e0Groups == null || e0Groups.Count == 0 ? "none" : string.Join(", ", e0Groups.ToArray())) }", 2);
+                Trace($"Target EntityGroup matches: { (e1Groups == null || e1Groups.Count == 0 ? "none" : string.Join(", ", e1Groups.ToArray())) }", 2);
             }
+
             return ruleSet.Evaluate(e0Groups, e1Groups);
         }
-        bool EvaluateRules(BaseEntity entity, HitInfo hitInfo, RuleSet ruleSet)
+
+        private bool EvaluateRules(BaseEntity entity, HitInfo hitInfo, RuleSet ruleSet)
         {
-            return EvaluateRules(entity, hitInfo.Initiator, ruleSet);
+            return EvaluateRules(entity, hitInfo.Initiator ?? hitInfo.WeaponPrefab, ruleSet);
         }
 
-        // checks for a lock
-        object CheckLock(RuleSet ruleSet, BaseEntity entity, HitInfo hitInfo)
+        // checks an entity to see if it has a lock
+        private object CheckLock(RuleSet ruleSet, BaseEntity entity, HitInfo hitInfo)
         {
-            // exclude deployed items in storage container lock check (since they can't have locks)
-            if (entity.ShortPrefabName.Equals("lantern.deployed") ||
-               entity.ShortPrefabName.Equals("ceilinglight.deployed") ||
-               entity.ShortPrefabName.Equals("furnace.large") ||
-               entity.ShortPrefabName.Equals("campfire") ||
-               entity.ShortPrefabName.Equals("furnace") ||
-               entity.ShortPrefabName.Equals("refinery_small_deployed") ||
-               entity.ShortPrefabName.Equals("waterbarrel") ||
-               entity.ShortPrefabName.Equals("jackolantern.angry") ||
-               entity.ShortPrefabName.Equals("jackolantern.happy") ||
-               entity.ShortPrefabName.Equals("repairbench_deployed") ||
-               entity.ShortPrefabName.Equals("researchtable_deployed") ||
-               entity.ShortPrefabName.Contains("shutter"))
-                return null;
+            var slot = entity.GetSlot(BaseEntity.Slot.Lock); // check for lock
 
-            // if unlocked damage allowed - check for lock
-            BaseLock alock = entity.GetSlot(BaseEntity.Slot.Lock) as BaseLock; // get lock
-            if (alock == null) return null; // no lock, return null
-
-            if (alock.IsLocked()) // is locked, cancel damage except heli
+            if (slot == null || !slot.IsLocked())
             {
-                // if heliDamageLocked option is false or heliDamage is false, all damage is cancelled
-                if (!ruleSet.HasFlag(RuleFlags.HeliDamageLocked) || ruleSet.HasFlag(RuleFlags.NoHeliDamage)) return false;
-                object heli = CheckHeliInitiator(ruleSet, hitInfo);
-                if (heli != null)
-                    return (bool)heli;
+                return null; // no lock or unlocked, continue checks
+            }
+
+            // if HeliDamageLocked flag is false or NoHeliDamage flag, all damage is cancelled from immortal flag
+            if (!ruleSet.HasFlag(RuleFlags.HeliDamageLocked) || ruleSet.HasFlag(RuleFlags.NoHeliDamage))
+            {
                 return false;
             }
-            return null;
+
+            object heli = CheckHeliInitiator(ruleSet, hitInfo);
+
+            return Convert.ToBoolean(heli); // cancel damage except from heli
         }
 
-        // check for heli
-        object CheckHeliInitiator(RuleSet ruleSet, HitInfo hitInfo)
+        private object CheckHeliInitiator(RuleSet ruleSet, HitInfo hitInfo)
         {
             // Check for heli initiator
-            if (hitInfo.Initiator is BaseHelicopter ||
-               (hitInfo.Initiator != null && (
-                   hitInfo.Initiator.ShortPrefabName.Equals("oilfireballsmall") ||
-                   hitInfo.Initiator.ShortPrefabName.Equals("napalm"))))
+            if (hitInfo.Initiator is BaseHelicopter || (hitInfo.Initiator != null && (hitInfo.Initiator.ShortPrefabName.Equals("oilfireballsmall") || hitInfo.Initiator.ShortPrefabName.Equals("napalm"))))
+            {
                 return !ruleSet.HasFlag(RuleFlags.NoHeliDamage);
-            else if (hitInfo.WeaponPrefab != null) // prevent null spam
-            {
-                if (hitInfo.WeaponPrefab.ShortPrefabName.Equals("rocket_heli") ||
-                   hitInfo.WeaponPrefab.ShortPrefabName.Equals("rocket_heli_napalm"))
-                    return !ruleSet.HasFlag(RuleFlags.NoHeliDamage);
             }
-            return null;
-        }
-
-        object CheckTurretInitiator(RuleSet ruleSet, HitInfo hitInfo)
-        {
-            // Check for turret initiator
-            if (hitInfo.WeaponPrefab != null)
+            else if (hitInfo.WeaponPrefab != null && (hitInfo.WeaponPrefab.ShortPrefabName.Equals("rocket_heli") || hitInfo.WeaponPrefab.ShortPrefabName.Equals("rocket_heli_napalm")))
             {
-                try
-                {
-                    var turret = hitInfo.WeaponPrefab.GetComponentInParent<AutoTurret>();
-
-                    if (turret != null)
-                    {
-                        if (trace) Trace("Found WeaponPrefab in a turret", 2);
-                        return !ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer);
-                    }
-                }
-                catch { }
+                return !ruleSet.HasFlag(RuleFlags.NoHeliDamage);
             }
-
-            if (hitInfo.Weapon != null)
-            {
-                try
-                {
-                    var turret = hitInfo.Weapon.GetComponentInParent<AutoTurret>();
-
-                    if (turret != null)
-                    {
-                        if (trace) Trace("Found Weapon in a turret", 2);
-                        return !ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer);
-                    }
-                }
-                catch { }
-            }
-
-            if (hitInfo.Initiator is AutoTurret)
-            {
-                if (trace) Trace("Initiator is a turret", 2);
-                return !ruleSet.HasFlag(RuleFlags.NoTurretDamagePlayer);
-            }
-
             return null;
         }
 
         // checks if the player is authorized to damage the entity
-        bool CheckAuthorized(BaseEntity entity, BasePlayer player, RuleSet ruleSet)
+        private bool CheckAuthorized(BaseEntity entity, BasePlayer player, RuleSet ruleSet)
         {
-            // Allow twig damage by anyone if ruleset flag is set
-            if (ruleSet.HasFlag(RuleFlags.TwigDamage))
-            {
-                try
-                {
-                    var block = entity as BuildingBlock;
-                    if (block.grade == BuildingGrade.Enum.Twigs)
-                    {
-                        if (ruleSet.HasFlag(RuleFlags.TwigDamageRequiresOwnership) && block.OwnerID != player.userID)
-                        {
-                            if (trace) Trace("Blocking twig destruction...attacker is not block owner");
-                            return false;
-                        }
-
-                        if (trace) Trace("Allowing twig destruction...");
-                        return true;
-                    }
-                }
-                catch { }
-            }
-
-            // check if the player is the owner of the entity
-            if ((!ruleSet.HasFlag(RuleFlags.CupboardOwnership) && player.userID == entity.OwnerID) || entity.OwnerID == 0L)
-                return true; // player is the owner or the owner is undefined, allow damage/looting
-
-            // block if building blocked
-            if (player.IsBuildingBlocked(entity.transform.position, entity.transform.rotation, entity.bounds))
-                return false;
-
-            // if not CupboardOwnership, check for build authorization
             if (!ruleSet.HasFlag(RuleFlags.CupboardOwnership))
-                return player.IsBuildingAuthed(entity.transform.position, entity.transform.rotation, entity.bounds);
-
-            // else, allow damage
-            return true;
-        }
-
-        // handle player attacking an entity - specifically, checks resource dispensers
-        // to determine whether to prevent gathering, based on rules
-        object OnPlayerAttack(BasePlayer attacker, HitInfo hitInfo)
-        {
-            if (attacker == null || hitInfo == null || hitInfo.HitEntity == null) return null;
-            if (hitInfo?.HitEntity is ResourceEntity)
             {
-                if (!AllowDamage(hitInfo.HitEntity, hitInfo))
-                    return false;
+                if (entity.OwnerID == player.userID || entity.OwnerID == 0)
+                {
+                    return true; // allow damage to entities that the player owns
+                }
+
+                return player.IsBuildingAuthed(entity.WorldSpaceBounds());
             }
-            return null;
+
+            // treat entities outside of cupboard range as unowned, and entities inside cupboard range require authorization
+            return player.CanBuild(entity.WorldSpaceBounds());
         }
 
         private BasePlayer GetMountedPlayer(BaseMountable m)
@@ -1230,42 +1183,52 @@ namespace Oxide.Plugins
 
             return null;
         }
-        
-        object OnSamSiteTarget(SamSite samSite, BaseMountable m)
+
+        private object OnSamSiteTarget(SamSite ss, BaseMountable m)
         {
             var player = GetMountedPlayer(m);
 
-            if (player.IsValid())
+            if (!player.IsValid())
             {
-                object extCanEntityBeTargeted = Interface.CallHook("CanEntityBeTargeted", new object[] { player, samSite });
+                return null;
+            }
 
-                if (extCanEntityBeTargeted is bool)
+            object extCanEntityBeTargeted = Interface.CallHook("CanEntityBeTargeted", new object[] { player, ss });
+
+            if (extCanEntityBeTargeted is bool)
+            {
+                if ((bool)extCanEntityBeTargeted)
                 {
-                    if ((bool)extCanEntityBeTargeted)
-                    {
-                        return null;
-                    }
-
-                    return true;
+                    return null;
                 }
 
-                RuleSet ruleSet = GetRuleSet(player, samSite);
+                ss.CancelInvoke(ss.WeaponTick);
+                return false;
+            }
 
-                if (ruleSet.HasFlag(RuleFlags.SamSitesIgnorePlayers))
-                {
-                    var entityLocations = GetLocationKeys(m);
-                    var initiatorLocations = GetLocationKeys(samSite);
-                    // check for exclusion zones (zones with no rules mapped)
-                    if (CheckExclusion(entityLocations, initiatorLocations)) return null;
-                    if (CheckExclusion(player, samSite)) return null;
-                    return true;
-                }
+            RuleSet ruleSet = GetRuleSet(player, ss);
+
+            if (ruleSet == null)
+            {
+                return null;
+            }
+
+            if (ruleSet.HasFlag(RuleFlags.SamSitesIgnorePlayers))
+            {
+                var entityLocations = GetLocationKeys(m);
+                var initiatorLocations = GetLocationKeys(ss);
+                // check for exclusion zones (zones with no rules mapped)
+                if (CheckExclusion(entityLocations, initiatorLocations, false)) return null;
+                // check for exclusions in entity groups
+                if (CheckExclusion(player, ss)) return null;
+                ss.CancelInvoke(ss.WeaponTick);
+                return false;
             }
 
             return null;
         }
 
-        object CanBeTargeted(BaseMountable m, MonoBehaviour turret)
+        private object CanBeTargeted(BaseMountable m, MonoBehaviour turret)
         {
             var player = GetMountedPlayer(m);
 
@@ -1273,16 +1236,16 @@ namespace Oxide.Plugins
         }
 
         // check if entity can be targeted
-        object CanBeTargeted(BasePlayer target, MonoBehaviour turret)
+        private object CanBeTargeted(BasePlayer target, MonoBehaviour turret)
         {
-            //Puts($"CanBeTargeted called for {target.name}", 2);
-            if (!serverInitialized || target == null || turret == null) return null;
-            if (turret as HelicopterTurret)
+            //if (trace) Trace($"CanBeTargeted called for {target.name}", 2);
+            if (target == null || turret == null || turret is HelicopterTurret)
             {
-                //if (target.InSafeZone() && !target.IsHostile()) return false;
                 return null;
             }
+
             object extCanEntityBeTargeted = Interface.CallHook("CanEntityBeTargeted", new object[] { target, turret as BaseEntity });
+
             if (extCanEntityBeTargeted is bool)
             {
                 if ((bool)extCanEntityBeTargeted)
@@ -1292,28 +1255,58 @@ namespace Oxide.Plugins
 
                 return false;
             }
-            RuleSet ruleSet = GetRuleSet(target, turret as BaseCombatEntity);
-            if (target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnoreScientist))
-                return false;
-            if (!target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
+
+            RuleSet ruleSet = GetRuleSet(target, turret as BaseEntity);
+
+            if (ruleSet == null)
             {
-                var weapon = (turret as AutoTurret)?.GetAttachedWeapon()?.GetItem();
-                if (weapon != null && weapon.info.shortname.StartsWith("fun.")) return null;
-                var entityLocations = GetLocationKeys(target);
-                var initiatorLocations = GetLocationKeys(turret as BaseEntity);
-                // check for exclusion zones (zones with no rules mapped)
-                if (CheckExclusion(entityLocations, initiatorLocations)) return null;
+                return null;
+            }
+
+            if (target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnoreScientist))
+            {
                 return false;
             }
+
+            if (!target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
+            {
+                if (turret is AutoTurret)
+                {
+                    var weapon = (turret as AutoTurret)?.GetAttachedWeapon()?.GetItem();
+
+                    if (weapon?.info?.shortname?.StartsWith("fun.") ?? false)
+                    {
+                        return null;
+                    }
+                }
+
+                var entityLocations = GetLocationKeys(target);
+                var initiatorLocations = GetLocationKeys(turret as BaseEntity);
+
+                // check for exclusion zones (zones with no rules mapped)
+                if (CheckExclusion(entityLocations, initiatorLocations, false))
+                {
+                    return null;
+                }
+
+                return false;
+            }
+
             return null;
         }
-        
+
         // ignore players stepping on traps if configured
-        object OnTrapTrigger(BaseTrap trap, GameObject go)
+        private object OnTrapTrigger(BaseTrap trap, GameObject go)
         {
-            BasePlayer player = go.GetComponent<BasePlayer>();
-            if (player == null || trap == null) return null;
+            var player = go.GetComponent<BasePlayer>();
+
+            if (player == null || trap == null)
+            {
+                return null;
+            }
+
             object extCanEntityTrapTrigger = Interface.CallHook("CanEntityTrapTrigger", new object[] { trap, player });
+            
             if (extCanEntityTrapTrigger is bool)
             {
                 if ((bool)extCanEntityTrapTrigger)
@@ -1323,39 +1316,62 @@ namespace Oxide.Plugins
 
                 return true;
             }
-            RuleSet ruleSet = GetRuleSet(trap, player);
-            if (player.IsNpc && ruleSet.HasFlag(RuleFlags.TrapsIgnoreScientist))
-                return false;
-            if (ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers))
-                return false;
-            return null;
+
+            var entityLocations = GetLocationKeys(player);
+            var initiatorLocations = GetLocationKeys(trap);
+
+            // check for exclusion zones (zones with no rules mapped)
+            if (CheckExclusion(entityLocations, initiatorLocations, false))
+            {
+                return null;
+            }
+
+            RuleSet ruleSet = GetRuleSet(player, trap);
+
+            if (ruleSet == null)
+            {
+                return null;
+            }
+            
+            return (player.IsNpc && ruleSet.HasFlag(RuleFlags.TrapsIgnoreScientist)) || (!player.IsNpc && ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers)) ? true : (object)null;
         }
 
-        // Check exclusion for entities
-        bool CheckExclusion(BaseEntity target, BaseEntity attacker)
+        // Check for exclusions in entity groups (target, attacker)
+        private bool CheckExclusion(BaseEntity target, BaseEntity attacker)
         {
-            if (!serverInitialized || !target || !attacker) return false;
-            // check for exclusions in entity groups
+            string targetName = target.GetType().Name;
 
-            //var targetGroup = data.groups.FirstOrDefault(g => g.exclusions.Contains(target.ShortPrefabName, CompareOptions.OrdinalIgnoreCase));
-            var attackerGroup = data.groups.FirstOrDefault(g => g.exclusions.Contains(attacker.ShortPrefabName, CompareOptions.OrdinalIgnoreCase));
+            if (!data.groups.Any(group => group.members.Contains(target.ShortPrefabName, CompareOptions.OrdinalIgnoreCase) || group.exclusions.Contains(targetName, CompareOptions.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
 
-            return attackerGroup != null;
+            string attackerName = attacker.GetType().Name;
+
+            return data.groups.Any(group => group.exclusions.Contains(attacker.ShortPrefabName, CompareOptions.OrdinalIgnoreCase) || group.exclusions.Contains(attackerName, CompareOptions.OrdinalIgnoreCase));
         }
 
-        RuleSet GetRuleSet(List<string> e0Locations, List<string> e1Locations)
+        private RuleSet GetRuleSet(List<string> vicLocations, List<string> atkLocations)
         {
             RuleSet ruleSet = currentRuleSet;
-            if (e0Locations?.Count > 0 && e1Locations?.Count > 0)
+
+            if (atkLocations == null) atkLocations = vicLocations; // Allow TruePVE to be used on PVP servers that want to add PVE zones via Zone Manager (just do this inside of Zone Manager instead...)
+
+            if (vicLocations?.Count > 0 && atkLocations?.Count > 0)
             {
-                if (trace) Trace($"Beginning RuleSet lookup for [{ (e0Locations.Count == 0 ? "empty" : string.Join(", ", e0Locations.ToArray())) }] and [{ (e1Locations.Count == 0 ? "empty" : string.Join(", ", e1Locations.ToArray())) }]", 2);
-                List<string> locations = GetSharedLocations(e0Locations, e1Locations);
+                if (trace) Trace($"Beginning RuleSet lookup for [{ (vicLocations.Count == 0 ? "empty" : string.Join(", ", vicLocations.ToArray())) }] and [{ (atkLocations.Count == 0 ? "empty" : string.Join(", ", atkLocations.ToArray())) }]", 2);
+                
+                var locations = GetSharedLocations(vicLocations, atkLocations);
+                
                 if (trace) Trace($"Shared locations: { (locations.Count == 0 ? "none" : string.Join(", ", locations.ToArray())) }", 3);
-                if (locations != null && locations.Count > 0)
+                
+                if (locations?.Count > 0)
                 {
-                    List<string> names = locations.Select(s => data.mappings[s]).ToList();
-                    List<RuleSet> sets = data.ruleSets.Where(r => names.Contains(r.name)).ToList();
+                    var names = locations.Select(s => data.mappings[s]).ToList();
+                    var sets = data.ruleSets.Where(r => names.Contains(r.name)).ToList();
+                    
                     if (trace) Trace($"Found {names.Count} location names, with {sets.Count} mapped RuleSets", 3);
+                
                     if (sets.Count == 0 && data.mappings.ContainsKey(AllZones) && data.ruleSets.Any(r => r.name == data.mappings[AllZones]))
                     {
                         sets.Add(data.ruleSets.FirstOrDefault(r => r.name == data.mappings[AllZones]));
@@ -1369,37 +1385,36 @@ namespace Oxide.Plugins
                     }
 
                     ruleSet = sets.FirstOrDefault();
-                    if (trace && ruleSet != null) Trace($"Found RuleSet: {ruleSet.name}", 3);
+                    if (trace) Trace($"Found RuleSet: {ruleSet?.name ?? "null"}", 3);
                 }
             }
+
             if (ruleSet == null)
             {
                 ruleSet = currentRuleSet;
-                if (trace) Trace($"No RuleSet found; assigned current global RuleSet: {ruleSet.name}", 3);
+                if (trace) Trace($"No RuleSet found; assigned current global RuleSet: {ruleSet?.name ?? "null"}", 3);
             }
+
             return ruleSet;
         }
 
-        RuleSet GetRuleSet(BaseEntity e0, BaseEntity e1)
+        private RuleSet GetRuleSet(BaseEntity e0, BaseEntity e1)
         {
-            //if(!serverInitialized) return List<string>;
+            //if (!serverInitialized) return currentRuleSet;
             List<string> e0Locations = GetLocationKeys(e0);
             List<string> e1Locations = GetLocationKeys(e1);
-
             return GetRuleSet(e0Locations, e1Locations);
         }
 
         // get locations shared between the two passed location lists
-        List<string> GetSharedLocations(List<string> e0Locations, List<string> e1Locations)
+        private List<string> GetSharedLocations(List<string> e0Locations, List<string> e1Locations)
         {
-            //if(!serverInitialized) return List<string>;
             return e0Locations.Intersect(e1Locations).Where(s => data.HasMapping(s)).ToList();
         }
 
         // Check exclusion for given entity locations
-        bool CheckExclusion(List<string> e0Locations, List<string> e1Locations)
+        private bool CheckExclusion(List<string> e0Locations, List<string> e1Locations, bool trace)
         {
-            if (!serverInitialized) return false;
             if (e0Locations == null || e1Locations == null)
             {
                 if (trace) Trace("No shared locations (empty location) - no exclusions", 3);
@@ -1409,24 +1424,24 @@ namespace Oxide.Plugins
             List<string> locations = GetSharedLocations(e0Locations, e1Locations);
             if (trace) Trace($"Shared locations: {(locations.Count == 0 ? "none" : string.Join(", ", locations.ToArray()))}", 3);
             if (locations != null && locations.Count > 0)
+            {
                 foreach (string loc in locations)
+                {
                     if (data.HasEmptyMapping(loc))
                     {
                         if (trace) Trace($"Found exclusion mapping for location: {loc}", 3);
                         return true;
                     }
+                }
+            }
             if (trace) Trace("No shared locations, or no matching exclusion mapping - no exclusions)", 3);
             return false;
         }
 
         // add or update a mapping
-        bool AddOrUpdateMapping(string key, string ruleset)
+        private bool AddOrUpdateMapping(string key, string ruleset)
         {
-            LoadConfiguration(); // Added to help ensure that valid rulesets don't get deleted
-            if (!serverInitialized) return false;
-            if (string.IsNullOrEmpty(key))
-                return false;
-            if (ruleset == null || (!data.ruleSets.Select(r => r.name).Contains(ruleset) && ruleset != "exclude"))
+            if (!serverInitialized || string.IsNullOrEmpty(key) || ruleset == null || (!data.ruleSets.Select(r => r.name).Contains(ruleset) && ruleset != "exclude"))
                 return false;
 
             if (data.HasMapping(key))
@@ -1441,10 +1456,9 @@ namespace Oxide.Plugins
         }
 
         // remove a mapping
-        bool RemoveMapping(string key)
+        private bool RemoveMapping(string key)
         {
-            if (!serverInitialized) return false;
-            if (string.IsNullOrEmpty(key))
+            if (!serverInitialized || string.IsNullOrEmpty(key))
                 return false;
             if (data.HasMapping(key))
             {
@@ -1458,13 +1472,13 @@ namespace Oxide.Plugins
 
         #region Messaging
         // send message to player (chat)
-        void SendMessage(BasePlayer player, string key, object[] options = null) => SendReply(player, BuildMessage(player, key, options));
+        private void SendMessage(BasePlayer player, string key, object[] options = null) => SendReply(player, BuildMessage(player, key, options));
 
         // send message to player (console)
-        void SendMessage(ConsoleSystem.Arg arg, string key, object[] options = null) => SendReply(arg, BuildMessage(null, key, options));
+        private void SendMessage(ConsoleSystem.Arg arg, string key, object[] options = null) => SendReply(arg, RemoveFormatting(BuildMessage(null, key, options)));
 
         // build message string
-        string BuildMessage(BasePlayer player, string key, object[] options = null)
+        private string BuildMessage(BasePlayer player, string key, object[] options = null)
         {
             string message = player == null ? GetMessage(key) : GetMessage(key, player.UserIDString);
             if (options != null && options.Length > 0)
@@ -1490,16 +1504,16 @@ namespace Oxide.Plugins
         }
 
         // wrap string in <size> tag, handles parsing size string to integer
-        string WrapSize(string size, string input)
+        private string WrapSize(string size, string input)
         {
-            int i = 0;
+            int i;
             if (int.TryParse(size, out i))
                 return WrapSize(i, input);
             return input;
         }
 
         // wrap a string in a <size> tag with the passed size
-        string WrapSize(int size, string input)
+        private string WrapSize(int size, string input)
         {
             if (string.IsNullOrEmpty(input))
                 return input;
@@ -1507,7 +1521,7 @@ namespace Oxide.Plugins
         }
 
         // wrap a string in a <color> tag with the passed color
-        string WrapColor(string color, string input)
+        private string WrapColor(string color, string input)
         {
             if (input == null || input.Equals("") || color == null || color.Equals(""))
                 return input;
@@ -1515,10 +1529,12 @@ namespace Oxide.Plugins
         }
 
         // show usage information
-        void ShowUsage(ConsoleSystem.Arg arg) => SendReply(arg, usageString);
+        private void ShowUsage(ConsoleSystem.Arg arg) => SendReply(arg, RemoveFormatting(usageString));
 
-        // warn that the server is set to PVE mdoe
-        void WarnPve() => PrintWarning(GetMessage("Warning_PveMode"));
+        public string RemoveFormatting(string source) => source.Contains(">") ? Regex.Replace(source, "<.*?>", string.Empty) : source;
+
+        // warn that the server is set to PVE mode
+        private void WarnPve() => PrintWarning(GetMessage("Warning_PveMode"));
         #endregion
 
         #region Helper Procedures
@@ -1526,20 +1542,14 @@ namespace Oxide.Plugins
         private bool IsAdmin(BasePlayer player)
         {
             if (player == null) return false;
-            if (player?.net?.connection == null) return true;
+            if (!player.IsConnected) return true;
             return player.net.connection.authLevel > 0;
-        }
-
-        // check if player has permission or is an admin
-        private bool hasPermission(BasePlayer player, string permname)
-        {
-            return IsAdmin(player) || permission.UserHasPermission(player.UserIDString, permname);
         }
 
         // is player a HumanNPC
         private bool IsHumanNPC(BasePlayer player)
         {
-            return player.userID < 76560000000000000L && player.userID > 0L && !player.IsDestroyed;
+            return player.userID < 76560000000000000L && player.userID > 0L;
         }
 
         // get location keys from ZoneManager (zone IDs) or LiteZones (zone names)
@@ -1547,7 +1557,7 @@ namespace Oxide.Plugins
         {
             if (!useZones || entity == null) return null;
             List<string> locations = new List<string>();
-            string zname = null;
+            string zname;
             if (ZoneManager != null)
             {
                 List<string> zmloc = new List<string>();
@@ -1599,7 +1609,7 @@ namespace Oxide.Plugins
                         locations.Add(s);
                         zname = (string)ZoneManager.Call("GetZoneName", s);
                         if (zname != null) locations.Add(zname);
-                        if (trace) base.Puts($"Found zone {zname}: {s}");
+                        if (trace) Puts($"Found zone {zname}: {s}");
                     }
                 }
             }
@@ -1611,7 +1621,7 @@ namespace Oxide.Plugins
                     locations.AddRange(lzloc);
                 }
             }
-            if (locations == null || locations.Count == 0) return null;
+            //if (locations == null || locations.Count == 0) return null;
             return locations;
         }
 
@@ -1630,7 +1640,7 @@ namespace Oxide.Plugins
         }
 
         // handle raycast from player (for prodding)
-        bool GetRaycastTarget(BasePlayer player, out object closestEntity)
+        private bool GetRaycastTarget(BasePlayer player, out object closestEntity)
         {
             closestEntity = false;
 
@@ -1644,7 +1654,7 @@ namespace Oxide.Plugins
         }
 
         // loop to update current ruleset
-        void TimerLoop(bool firstRun = false)
+        private void TimerLoop(bool firstRun = false)
         {
             string ruleSetName;
             data.schedule.ClockUpdate(out ruleSetName, out currentBroadcastMessage);
@@ -1656,7 +1666,7 @@ namespace Oxide.Plugins
                 if (data.schedule.broadcast && currentBroadcastMessage != null)
                 {
                     Server.Broadcast(currentBroadcastMessage, GetMessage("Prefix"));
-                    base.Puts(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage);
+                    Puts(RemoveFormatting(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage));
                 }
             }
 
@@ -1664,12 +1674,11 @@ namespace Oxide.Plugins
                 scheduleUpdateTimer = timer.Once(data.schedule.useRealtime ? 30f : 3f, () => TimerLoop());
         }
 
-        internal void Trace(string message, int indentation = 0) => LogToFile(traceFile, "".PadLeft(indentation, ' ') + message, this);
         #endregion
 
         #region Subclasses
         // configuration and data storage container
-        class TruePVEData
+        private class TruePVEData
         {
             [JsonProperty(PropertyName = "Config Version")]
             public string configVersion = null;
@@ -1739,13 +1748,15 @@ namespace Oxide.Plugins
             }
         }
 
-        class RuleSet
+        private class RuleSet
         {
             public string name;
             public bool enabled = true;
             public bool defaultAllowDamage = false;
-            [JsonConverter(typeof(StringEnumConverter))]
-            public RuleFlags flags = RuleFlags.None;
+            public string flags = string.Empty;
+            [JsonIgnore]
+            public RuleFlags _flags = RuleFlags.None;
+
             public HashSet<string> rules = new HashSet<string>();
             HashSet<Rule> parsedRules = new HashSet<Rule>();
 
@@ -1807,6 +1818,21 @@ namespace Oxide.Plugins
                     parsedRules.Add(new Rule(ruleText));
                 parsedRules.Remove(null);
                 ValidateRules();
+                if (flags.Contains(","))
+                {
+                    foreach (string flagText in flags.Split(','))
+                    {
+                        RuleFlags flag;
+                        if (Enum.TryParse(flagText, out flag))
+                        {
+                            if (!_flags.HasFlag(flag))
+                            {
+                                _flags |= flag;
+                            }
+                        }
+                        else Instance.Puts("WARNING - invalid flag: {0} (does this flag still exist?)", flagText.Trim());
+                    }
+                }
             }
 
             public void ValidateRules()
@@ -1823,12 +1849,12 @@ namespace Oxide.Plugins
                 parsedRules.Add(new Rule(ruleText));
             }
 
-            public bool HasAnyFlag(RuleFlags flags) { return (this.flags | flags) != RuleFlags.None; }
-            public bool HasFlag(RuleFlags flag) { return (flags & flag) == flag; }
-            public bool IsEmpty() { return (rules == null || rules.Count == 0) && flags == RuleFlags.None; }
+            public bool HasAnyFlag(RuleFlags flags) { return (this._flags | flags) != RuleFlags.None; }
+            public bool HasFlag(RuleFlags flag) { return (_flags & flag) == flag; }
+            public bool IsEmpty() { return (rules == null || rules.Count == 0) && _flags == RuleFlags.None; }
         }
 
-        class Rule
+        private class Rule
         {
             public string ruleText;
             [JsonIgnore]
@@ -1858,7 +1884,7 @@ namespace Oxide.Plugins
         }
 
         // helper class to translate rule text to rules
-        class RuleTranslator
+        private class RuleTranslator
         {
             static readonly Regex regex = new Regex(@"\s+");
             static readonly List<string> synonyms = new List<string>() { "anything", "nothing", "all", "any", "none", "everything" };
@@ -1891,9 +1917,12 @@ namespace Oxide.Plugins
         }
 
         // container for mapping entities
-        class EntityGroup
+        private class EntityGroup
         {
+            List<string> memberList = new List<string>();
+            List<string> exclusionList = new List<string>(); 
             public string name;
+
             public string members
             {
                 get
@@ -1907,8 +1936,7 @@ namespace Oxide.Plugins
                     memberList = value.Split(',').Select(s => s.Trim()).ToList();
                 }
             }
-            List<string> memberList = new List<string>();
-
+            
             public string exclusions
             {
                 get
@@ -1922,10 +1950,15 @@ namespace Oxide.Plugins
                     exclusionList = value.Split(',').Select(s => s.Trim()).ToList();
                 }
             }
-            List<string> exclusionList = new List<string>();
-
-            public EntityGroup() { }
-            public EntityGroup(string name) { this.name = name; }
+            
+            public EntityGroup() 
+            {
+            
+            }
+            public EntityGroup(string name) 
+            { 
+                this.name = name; 
+            }
             public void Add(string prefabOrType)
             {
                 memberList.Add(prefabOrType);
@@ -1933,13 +1966,13 @@ namespace Oxide.Plugins
             public bool Contains(BaseEntity entity)
             {
                 if (entity == null) return false;
-                return (memberList.Contains(entity.GetType().Name) || memberList.Contains(entity.ShortPrefabName)) &&
-                      !(exclusionList.Contains(entity.GetType().Name) || exclusionList.Contains(entity.ShortPrefabName));
+                return (memberList.Contains(entity.GetType().Name) || memberList.Contains(entity.ShortPrefabName)) && !(exclusionList.Contains(entity.GetType().Name) || exclusionList.Contains(entity.ShortPrefabName));
             }
+
         }
 
         // scheduler
-        class Schedule
+        private class Schedule
         {
             public bool enabled = false;
             public bool useRealtime = false;
@@ -1961,12 +1994,11 @@ namespace Oxide.Plugins
             }
 
             // returns delta between current time and next schedule entry
-            public void ClockUpdate(out string currentRuleSet, out string message)
+            public void ClockUpdate(out string ruleSetName, out string message)
             {
                 TimeSpan time = useRealtime ? new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0).Add(DateTime.Now.TimeOfDay) : TOD_Sky.Instance.Cycle.DateTime.TimeOfDay;
                 try
                 {
-
                     ScheduleEntry se = null;
                     // get the most recent schedule entry
                     if (parsedEntries.Where(t => !t.isDaily).Count() > 0)
@@ -1978,7 +2010,6 @@ namespace Oxide.Plugins
                         try
                         {
                             daily = parsedEntries.FirstOrDefault(e => e.time == parsedEntries.Where(t => t.valid && t.time <= DateTime.Now.TimeOfDay && t.isDaily).Max(t => t.time));
-
                         }
                         catch (Exception)
                         { // no daily entries
@@ -1988,7 +2019,7 @@ namespace Oxide.Plugins
                         if (daily != null && daily.time.Add(new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0)) > se.time)
                             se = daily;
                     }
-                    currentRuleSet = se.ruleSet;
+                    ruleSetName = se.ruleSet;
                     message = se.message;
                 }
                 catch (Exception)
@@ -2003,7 +2034,6 @@ namespace Oxide.Plugins
                         try
                         {
                             daily = parsedEntries.FirstOrDefault(e => e.time == parsedEntries.Where(t => t.valid && t.isDaily).Max(t => t.time));
-
                         }
                         catch (Exception)
                         { // no daily entries
@@ -2013,14 +2043,14 @@ namespace Oxide.Plugins
                         if (daily != null && daily.time.Add(new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0)) > se.time)
                             se = daily;
                     }
-                    currentRuleSet = se?.ruleSet;
+                    ruleSetName = se?.ruleSet;
                     message = se?.message;
                 }
             }
         }
 
         // helper class to translate schedule text to schedule entries
-        class ScheduleTranslator
+        private class ScheduleTranslator
         {
             static readonly Regex regex = new Regex(@"\s+");
             public static bool Translate(ScheduleEntry entry)
@@ -2034,7 +2064,7 @@ namespace Oxide.Plugins
                 string rs = splitStr[1];
                 // remaining should be message
                 string message = splitStr.Length > 2 ? splitStr[2] : null;
-
+                
                 try
                 {
                     if (ts.StartsWith("*."))
@@ -2047,14 +2077,14 @@ namespace Oxide.Plugins
                     entry.message = message;
                     return true;
                 }
-                catch (Exception)
+                catch
                 { }
 
                 return false;
             }
         }
 
-        class ScheduleEntry
+        private class ScheduleEntry
         {
             public string ruleSet;
             public string message;
