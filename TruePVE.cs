@@ -1,3 +1,4 @@
+
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -11,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.1", ResourceId = 1789)]
+    [Info("TruePVE", "ignignokt84", "0.9.2", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -1115,15 +1116,36 @@ namespace Oxide.Plugins
             List<string> locations = new List<string>();
             if (ZoneManager != null)
             {
-                List<string> zmloc = (List<string>)ZoneManager.Call("GetEntityZones", new object[] { entity });
-                if (zmloc != null && zmloc.Count > 0)
+                List<string> zmloc = new List<string>();
+                if(ZoneManager.Version >= new VersionNumber(3, 0, 1))
+                {
+                    string[] zmlocnew = (string[]) ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
+                    foreach(string s in zmlocnew)
+                    {
+                        zmloc.Add(s);
+                    }
+                }
+                else if(ZoneManager.Version == new VersionNumber(3, 0, 0))
+                {
+                    zmloc = null;
+                }
+                else
+                {
+                    zmloc = (List<string>)ZoneManager.Call("GetEntityZones", new object[] { entity });
+                }
+
+                if(zmloc != null && zmloc.Count > 0)
+                {
                     locations.AddRange(zmloc);
+                }
             }
-            if (LiteZones != null)
+            if(LiteZones != null)
             {
                 List<string> lzloc = (List<string>) LiteZones?.Call("GetEntityZones", new object[] { entity });
-                if (lzloc != null && lzloc.Count > 0)
+                if(lzloc != null && lzloc.Count > 0)
+                {
                     locations.AddRange(lzloc);
+                }
             }
             if (locations == null || locations.Count == 0) return null;
             return locations;
