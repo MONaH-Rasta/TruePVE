@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.6", ResourceId = 1789)]
+    [Info("TruePVE", "ignignokt84", "0.9.7", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -885,7 +885,7 @@ namespace Oxide.Plugins
         // check if entity can be targeted
         object CanBeTargeted(BaseCombatEntity target, MonoBehaviour turret)
         {
-			//Puts($"CanBeTargeted called for {target.name}", 2);
+            //Puts($"CanBeTargeted called for {target.name}", 2);
             if (!serverInitialized || target == null || turret == null) return null;
             if (turret as HelicopterTurret)
                 return null;
@@ -1131,7 +1131,7 @@ namespace Oxide.Plugins
                             zmloc.Add(s);
                         }
                     }
-                    else
+                    else if(entity.IsValid())
                     {
                         string[] zmlocent = (string[]) ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
                         foreach(string s in zmlocent)
@@ -1150,7 +1150,7 @@ namespace Oxide.Plugins
                             zmloc.Add(s);
                         }
                     }
-                    else
+                    else if(entity.IsValid())
                     {
                         zmloc = (List<string>)ZoneManager.Call("GetEntityZones", new object[] { entity });
                     }
@@ -1163,20 +1163,13 @@ namespace Oxide.Plugins
                 if(zmloc != null && zmloc.Count > 0)
                 {
                     // Add names into list of ID numbers
-                    List<string> zmout = new List<string>();
                     foreach(string s in zmloc)
                     {
-                        zmout.Add(s);
+                        locations.Add(s);
                         zname = (string) ZoneManager.Call("GetZoneName", s);
-                        if(zname != null) zmout.Add(zname);
+                        if(zname != null) locations.Add(zname);
                         if(trace) Puts($"Found zone {zname}: {s}");
                     }
-                    if(zmout != null)
-                    {
-                        zmloc = zmout;
-                        zmout.Clear();
-                    }
-                    locations.AddRange(zmloc);
                 }
             }
             if(LiteZones != null)
