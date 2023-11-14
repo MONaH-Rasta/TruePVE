@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.5", ResourceId = 1789)]
+    [Info("TruePVE", "ignignokt84", "0.9.6", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -883,8 +883,9 @@ namespace Oxide.Plugins
         }
 
         // check if entity can be targeted
-        object CanBeTargeted(BaseCombatEntity target, object turret)
+        object CanBeTargeted(BaseCombatEntity target, MonoBehaviour turret)
         {
+			//Puts($"CanBeTargeted called for {target.name}", 2);
             if (!serverInitialized || target == null || turret == null) return null;
             if (turret as HelicopterTurret)
                 return null;
