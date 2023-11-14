@@ -10,10 +10,18 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-// fix scrap heli
-
 /*
-    1.1.9:
+    1.2.0:
+    Hooks:
+        CanEntityBeDamaged now properly blocks damage when returning false for decay damage
+        CanEntityBeTargeted now properly blocks being targeted when returning false
+        CanEntityTrapTrigger now properly blocks triggering the trap when returning false
+
+    Fixed CarsImmunity applying when not added
+    Improved OnEntityTakeDamage hook time by checking for required ruleset flags first, and by removing redundant code
+    Plants can now be harvested if the player is either 1) allowed to build in the area, or 2) owns the planter box
+
+    1.1.95:
     Added config protection to prevent invalid configs from being reset. Use the message in the server console to debug the error as some json validators fail to detect specific errors!
     Added IsEnabled API
     Added CarsImmunity flag - prevent cars from taking damage from collisions
@@ -76,7 +84,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.1.95")]
+    [Info("TruePVE", "nivex", "1.2.0")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -754,9 +762,22 @@ namespace Oxide.Plugins
         // set handleDamage to false and reference HandleDamage from the other mod(s)
         object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitInfo)
         {
-            //if(entity == null || hitInfo == null || hitInfo.HitEntity == null) return null;
-            if (hitInfo.damageTypes.Has(Rust.DamageType.Decay)) return null;
-            if (!tpveEnabled) return null;
+            if (entity == null || hitInfo == null) return null;
+
+            object extCanTakeDamage = Interface.CallHook("CanEntityTakeDamage", new object[] { entity, hitInfo });
+
+            if (extCanTakeDamage is bool)
+            {
+                if ((bool)extCanTakeDamage)
+                {
+                    return null;
+                }
+
+                hitInfo.damageTypes = new DamageTypeList();
+                return true;
+            }
+
+            if (!tpveEnabled || hitInfo.damageTypes.Has(DamageType.Decay)) return null;
             try { if (data.config.ContainsKey(Option.handleDamage) && !data.config[Option.handleDamage]) return null; } catch { }
             if (data.AllowKillingSleepers && entity is BasePlayer && entity.ToPlayer().IsSleeping()) return null;
             var handleDamage = HandleDamage(entity, hitInfo);
@@ -772,45 +793,28 @@ namespace Oxide.Plugins
         {
             if (!AllowDamage(entity, hitInfo))
                 return true;
+
             return null;
         }
-
         // determines if an entity is "allowed" to take damage
         bool AllowDamage(BaseEntity entity, HitInfo hitInfo)
         {
-            if (entity == null || hitInfo == null) return true;
-
-            object extCanTakeDamage = Interface.CallHook("CanEntityTakeDamage", new object[] { entity, hitInfo });
-            if (extCanTakeDamage != null && extCanTakeDamage is bool)
-            {
-                return (bool)extCanTakeDamage;
-            }
-
             // if default global is not enabled, return true (allow all damage)
             if (currentRuleSet == null || currentRuleSet.IsEmpty() || !currentRuleSet.enabled)
-                return true;
-
-            // allow decay
-            if (hitInfo.damageTypes.Get(DamageType.Decay) > 0)
                 return true;
 
             // allow NPCs to take damage
             if (entity is BaseNpc)
                 return true;
 
-            if (entity is BaseRidableAnimal)
-                return !entity.OwnerID.IsSteamId();
-
             // allow damage to door barricades and covers
             if (entity is Barricade && (entity.ShortPrefabName.Contains("door_barricade") || entity.ShortPrefabName.Contains("cover")))
                 return true;
 
             // if entity is a barrel, trash can, or giftbox, allow damage (exclude water barrels)
-            if (entity.ShortPrefabName.Contains("barrel") ||
-               entity.ShortPrefabName.Equals("loot_trash") ||
-               entity.ShortPrefabName.Equals("giftbox_loot"))
+            if (!entity.ShortPrefabName.Equals("waterbarrel"))
             {
-                if (!entity.ShortPrefabName.Equals("waterbarrel"))
+                if (entity.ShortPrefabName.Contains("barrel") || entity.ShortPrefabName.Equals("loot_trash") || entity.ShortPrefabName.Equals("giftbox_loot"))
                 {
                     return true;
                 }
@@ -842,39 +846,42 @@ namespace Oxide.Plugins
             // get entity and initiator locations (zones)
             List<string> entityLocations = GetLocationKeys(entity);
             List<string> initiatorLocations = GetLocationKeys(hitInfo.Initiator);
-            // check for exclusion zones (zones with no rules mapped)
             
-
+            // check for exclusion zones (zones with no rules mapped)
             if (trace) Trace("No exclusion found - looking up RuleSet...", 1);
+            
             // process location rules
             RuleSet ruleSet = GetRuleSet(entityLocations, initiatorLocations);
             if (trace) Trace($"Using RuleSet \"{ruleSet.name}\"", 1);
 
-            if (entity is ModularCar || entity is BasicCar || hitInfo.Initiator is ModularCar || hitInfo.Initiator is BasicCar || entity.PrefabName.Contains("modularcar") || hitInfo.Initiator != null && hitInfo.Initiator.PrefabName.Contains("modularcar"))
+            if (ruleSet.HasFlag(RuleFlags.CarsImmunity)) 
             {
-                if (ruleSet.HasFlag(RuleFlags.CarsImmunity))
+                if (entity is ModularCar || entity is BasicCar || hitInfo.Initiator is ModularCar || hitInfo.Initiator is BasicCar || entity.PrefabName.Contains("modularcar") || hitInfo.Initiator != null && hitInfo.Initiator.PrefabName.Contains("modularcar"))
                 {
                     if (trace) Trace("Car had a collision; block and return", 1);
                     return false;
                 }
-                
-                return false;
             }
-            if (CheckExclusion(entityLocations, initiatorLocations)) return true;
-            if (entity is MiniCopter && hitInfo.Initiator == entity && ruleSet.HasFlag(RuleFlags.MiniCopterIsImmuneToCollision))
+
+            if (CheckExclusion(entityLocations, initiatorLocations))
+            {
+                return true;
+            }
+
+            if (ruleSet.HasFlag(RuleFlags.MiniCopterIsImmuneToCollision) && entity is MiniCopter && hitInfo.Initiator == entity)
             {
                 if (trace) Trace("Minicopter had a collision; block and return", 1);
                 return false;
             }
 
-            if (entity is BasePlayer && hitInfo.Initiator is MiniCopter && ruleSet.HasFlag(RuleFlags.MiniCannotHurtPlayers))
+            if (ruleSet.HasFlag(RuleFlags.MiniCannotHurtPlayers) && entity is BasePlayer && hitInfo.Initiator is MiniCopter)
             {
-                if (trace) Trace("Initiator is scrap heli, and target is player; block and return", 1);
+                if (trace) Trace("Initiator is minicopter, and target is player; block and return", 1);
                 return false;
             }
 
             // handle suicide
-            if (hitInfo.damageTypes.Get(DamageType.Suicide) > 0)
+            if (hitInfo.damageTypes?.Get(DamageType.Suicide) > 0)
             {
                 if (trace) Trace($"DamageType is suicide; blocked? { (ruleSet.HasFlag(RuleFlags.SuicideBlocked) ? "true; block and return" : "false; continue processing") }", 1);
                 if (ruleSet.HasFlag(RuleFlags.SuicideBlocked))
@@ -886,12 +893,11 @@ namespace Oxide.Plugins
             }
 
             // allow anything to hurt itself
-            if (ruleSet.HasFlag(RuleFlags.SelfDamage) && (hitInfo.Initiator == entity))
+            if (ruleSet.HasFlag(RuleFlags.SelfDamage) && hitInfo.Initiator == entity)
                 return true;
 
             // Check storage containers and doors for locks
-            if ((entity is StorageContainer && ruleSet.HasFlag(RuleFlags.LockedBoxesImmortal)) ||
-               (entity is Door && ruleSet.HasFlag(RuleFlags.LockedDoorsImmortal)))
+            if (ruleSet.HasFlag(RuleFlags.LockedBoxesImmortal) && entity is StorageContainer || ruleSet.HasFlag(RuleFlags.LockedDoorsImmortal) && entity is Door)
             {
                 // check for lock
                 object hurt = CheckLock(ruleSet, entity, hitInfo);
@@ -902,6 +908,7 @@ namespace Oxide.Plugins
 
             // check heli and turret
             object heli = CheckHeliInitiator(ruleSet, hitInfo);
+
             if (heli != null)
             {
                 /*if (entity is BuildingBlock && ruleSet.HasFlag(RuleFlags.HeliCanDamageTwig))
@@ -924,7 +931,9 @@ namespace Oxide.Plugins
                 if (trace) Trace($"Initiator is heli, target is non-player; results: { ((bool)heli ? "allow and return" : "block and return") }", 1);
                 return (bool)heli;
             }
+
             object turret = CheckTurretInitiator(ruleSet, hitInfo);
+
             if (turret != null)
             {
                 if (entity is Scientist)
@@ -940,68 +949,96 @@ namespace Oxide.Plugins
                 if (trace) Trace($"Initiator is turret, target is non-player; results: { ((bool)turret ? "allow and return" : "block and return") }", 1);
                 return (bool)turret;
             }
+
             // after heli and turret check, return true if initiator is null
             if (hitInfo.Initiator == null)
             {
                 if (trace) Trace("Initiator empty; allow and return", 1);
                 return true;
             }
+
             if (hitInfo.Initiator is MiniCopter && entity is BuildingBlock)
             {
                 if (trace) Trace("Initiator is minicopter, target is building; evaluate and return", 1);
                 return EvaluateRules(entity, hitInfo, ruleSet);
             }
-            // check for sleeper protection - return false if sleeper protection is on (true)
-            if (ruleSet.HasFlag(RuleFlags.ProtectedSleepers) && hitInfo.Initiator is BaseNpc && entity is BasePlayer && (entity as BasePlayer).IsSleeping())
-            {
-                if (trace) Trace("Target is sleeping player, with ProtectedSleepers flag set; block and return", 1);
-                return false;
-            }
 
-            // allow NPC damage to other entities if sleeper protection is off
             if (hitInfo.Initiator is BaseNpc)
             {
-                if (trace) Trace("Initiator is NPC animal; allow and return", 1);
-                return true;
-            }
-
-            var player = GetPlayerFromHitInfo(hitInfo);
-            // ignore checks if authorized damage enabled (except for players)
-            if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !(entity is BasePlayer) && player.IsValid())
-            {
-                if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && entity.OwnerID.IsSteamId() && entity.OwnerID != player.userID)
+                // check for sleeper protection - return false if sleeper protection is on (true)
+                if (ruleSet.HasFlag(RuleFlags.ProtectedSleepers) && entity is BasePlayer && (entity as BasePlayer).IsSleeping())
                 {
-                    if (trace) Trace("Initiator is player who does not own non-player target; block and return", 1);
+                    if (trace) Trace("Target is sleeping player, with ProtectedSleepers flag set; block and return", 1);
                     return false;
                 }
 
-                if (CheckAuthorized(entity, player, ruleSet))
-                {
-                    if (entity is SamSite)
-                    {
-                        if (trace) Trace("Target is SamSite; evaluate and return", 1);
-                        return EvaluateRules(entity, hitInfo, ruleSet);
-                    }
-                    if (trace) Trace("Initiator is player with authorization over non-player target; allow and return", 1);
-                    return true;
-                }
+                if (trace) Trace("Initiator is NPC animal; allow and return", 1);
+                return true; // allow NPC damage to other entities if sleeper protection is off
             }
 
-            // allow sleeper damage by admins if configured
-            if (ruleSet.HasFlag(RuleFlags.AdminsHurtSleepers) && entity is BasePlayer && player.IsValid())
-                if ((entity as BasePlayer).IsSleeping() && IsAdmin(player))
+            var attacker = hitInfo.Initiator as BasePlayer;
+
+            if (attacker.IsValid())
+            {
+                if (entity is BaseRidableAnimal)
                 {
-                    if (trace) Trace("Initiator is admin player and target is sleeping player, with AdminsHurtSleepers flag set; allow and return", 1);
-                    return true;
+                    return !entity.OwnerID.IsSteamId();
                 }
 
-            // allow Human NPC damage if configured
-            if (ruleSet.HasFlag(RuleFlags.HumanNPCDamage) && entity is BasePlayer && player.IsValid())
-                if (IsHumanNPC(entity as BasePlayer) || IsHumanNPC(player))
+                if (entity is GrowableEntity)
                 {
-                    if (trace) Trace("Initiator or target is HumanNPC, with HumanNPCDamage flag set; allow and return", 1);
-                    return true;
+                    if (attacker.CanBuild())
+                    {
+                        return true;
+                    }
+
+                    var ge = entity as GrowableEntity;
+                    var planter = ge.GetPlanter();
+
+                    return planter == null || !planter.OwnerID.IsSteamId() || planter.OwnerID == attacker.userID;
                 }
+
+                // ignore checks if authorized damage enabled (except for players)
+                if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !(entity is BasePlayer))
+                {
+                    if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && entity.OwnerID.IsSteamId() && entity.OwnerID != attacker.userID)
+                    {
+                        if (trace) Trace("Initiator is player who does not own non-player target; block and return", 1);
+                        return false;
+                    }
+
+                    if (CheckAuthorized(entity, attacker, ruleSet))
+                    {
+                        if (entity is SamSite)
+                        {
+                            if (trace) Trace("Target is SamSite; evaluate and return", 1);
+                            return EvaluateRules(entity, hitInfo, ruleSet);
+                        }
+                        if (trace) Trace("Initiator is player with authorization over non-player target; allow and return", 1);
+                        return true;
+                    }
+                }
+
+                // allow sleeper damage by admins if configured
+                if (ruleSet.HasFlag(RuleFlags.AdminsHurtSleepers) && entity is BasePlayer)
+                {
+                    if ((entity as BasePlayer).IsSleeping() && IsAdmin(attacker))
+                    {
+                        if (trace) Trace("Initiator is admin player and target is sleeping player, with AdminsHurtSleepers flag set; allow and return", 1);
+                        return true;
+                    }
+                }
+
+                // allow Human NPC damage if configured
+                if (ruleSet.HasFlag(RuleFlags.HumanNPCDamage) && entity is BasePlayer)
+                {
+                    if (IsHumanNPC(entity as BasePlayer) || IsHumanNPC(attacker))
+                    {
+                        if (trace) Trace("Initiator or target is HumanNPC, with HumanNPCDamage flag set; allow and return", 1);
+                        return true;
+                    }
+                }
+            }
 
             if (trace) Trace("No match in pre-checks; evaluating RuleSet rules...", 1);
             return EvaluateRules(entity, hitInfo, ruleSet);
@@ -1171,18 +1208,6 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private BasePlayer GetPlayerFromHitInfo(HitInfo hitInfo)
-        {
-            var player = hitInfo?.Initiator as BasePlayer;
-
-            if (!player.IsValid() && hitInfo?.Initiator is BaseMountable)
-            {
-                player = GetMountedPlayer(hitInfo.Initiator as BaseMountable);
-            }
-
-            return player;
-        }
-
         private BasePlayer GetMountedPlayer(BaseMountable m)
         {
             if (m.GetMounted())
@@ -1205,7 +1230,7 @@ namespace Oxide.Plugins
 
             return null;
         }
-
+        
         object OnSamSiteTarget(SamSite samSite, BaseMountable m)
         {
             var player = GetMountedPlayer(m);
@@ -1214,9 +1239,14 @@ namespace Oxide.Plugins
             {
                 object extCanEntityBeTargeted = Interface.CallHook("CanEntityBeTargeted", new object[] { player, samSite });
 
-                if (extCanEntityBeTargeted is bool && (bool)extCanEntityBeTargeted)
+                if (extCanEntityBeTargeted is bool)
                 {
-                    return null;
+                    if ((bool)extCanEntityBeTargeted)
+                    {
+                        return null;
+                    }
+
+                    return true;
                 }
 
                 RuleSet ruleSet = GetRuleSet(player, samSite);
@@ -1253,9 +1283,14 @@ namespace Oxide.Plugins
                 return null;
             }
             object extCanEntityBeTargeted = Interface.CallHook("CanEntityBeTargeted", new object[] { target, turret as BaseEntity });
-            if (extCanEntityBeTargeted != null && extCanEntityBeTargeted is bool && (bool)extCanEntityBeTargeted)
+            if (extCanEntityBeTargeted is bool)
             {
-                return null;
+                if ((bool)extCanEntityBeTargeted)
+                {
+                    return null;
+                }
+
+                return false;
             }
             RuleSet ruleSet = GetRuleSet(target, turret as BaseCombatEntity);
             if (target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnoreScientist))
@@ -1272,16 +1307,21 @@ namespace Oxide.Plugins
             }
             return null;
         }
-
+        
         // ignore players stepping on traps if configured
         object OnTrapTrigger(BaseTrap trap, GameObject go)
         {
             BasePlayer player = go.GetComponent<BasePlayer>();
             if (player == null || trap == null) return null;
             object extCanEntityTrapTrigger = Interface.CallHook("CanEntityTrapTrigger", new object[] { trap, player });
-            if (extCanEntityTrapTrigger != null && extCanEntityTrapTrigger is bool && (bool)extCanEntityTrapTrigger)
+            if (extCanEntityTrapTrigger is bool)
             {
-                return null;
+                if ((bool)extCanEntityTrapTrigger)
+                {
+                    return null;
+                }
+
+                return true;
             }
             RuleSet ruleSet = GetRuleSet(trap, player);
             if (player.IsNpc && ruleSet.HasFlag(RuleFlags.TrapsIgnoreScientist))
@@ -1461,7 +1501,7 @@ namespace Oxide.Plugins
         // wrap a string in a <size> tag with the passed size
         string WrapSize(int size, string input)
         {
-            if (input == null || input.Equals(""))
+            if (string.IsNullOrEmpty(input))
                 return input;
             return "<size=" + size + ">" + input + "</size>";
         }
