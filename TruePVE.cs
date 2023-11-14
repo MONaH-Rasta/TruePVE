@@ -1,4 +1,3 @@
-
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -12,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.3", ResourceId = 1789)]
+    [Info("TruePVE", "ignignokt84", "0.9.4", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -1116,6 +1115,7 @@ namespace Oxide.Plugins
         {
             if(!useZones || entity == null) return null;
             List<string> locations = new List<string>();
+            string zname = null;
             if (ZoneManager != null)
             {
                 List<string> zmloc = new List<string>();
@@ -1127,7 +1127,10 @@ namespace Oxide.Plugins
                         string[] zmlocplr = (string[]) ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
                         foreach(string s in zmlocplr)
                         {
+                            zname = (string) ZoneManager.Call("GetZoneName", s);
+                            if(zname != null) zmloc.Add(zname);
                             zmloc.Add(s);
+                            if(trace) Puts($"Found zone {zname}:{s}");
                         }
                     }
                     else
@@ -1135,7 +1138,10 @@ namespace Oxide.Plugins
                         string[] zmlocent = (string[]) ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
                         foreach(string s in zmlocent)
                         {
+                            zname = (string) ZoneManager.Call("GetZoneName", s);
+                            if(zname != null) zmloc.Add(zname);
                             zmloc.Add(s);
+                            if(trace) Puts($"Found zone {zname}:{s}");
                         }
                     }
                 }
