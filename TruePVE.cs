@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "0.9.8", ResourceId = 1789)]
+    [Info("TruePVE", "RFC1920", "0.9.9", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -1130,8 +1130,7 @@ namespace Oxide.Plugins
         // get location keys from ZoneManager (zone IDs) or LiteZones (zone names)
         private List<string> GetLocationKeys(BaseEntity entity)
         {
-            if(!useZones) return null;
-            if(entity == null) return null;
+            if(!useZones || entity == null) return null;
             List<string> locations = new List<string>();
             string zname = null;
             if (ZoneManager != null)
