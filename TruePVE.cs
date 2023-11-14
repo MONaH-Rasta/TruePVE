@@ -10,6 +10,12 @@ using System.Text.RegularExpressions;
 using UnityEngine;
 
 /*
+    1.1.3:
+    CanEntityBeTargeted hook now returns null if true
+    CanEntityTrapTrigger hook now returns null if true
+    Possible fix for TimerLoop ClockUpdate.NullReferenceException @Gbutome
+    TurretsIgnorePlayers now checks for an excluded zone @ThePitereq
+
     1.1.2:    
     Added hook CanEntityTrapTrigger(BaseTrap trap, BasePlayer player)
     Added hook CanEntityBeTargeted(BasePlayer player, BaseEntity target)
@@ -34,7 +40,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.1.2")]
+    [Info("TruePVE", "RFC1920", "1.1.3")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -490,7 +496,7 @@ namespace Oxide.Plugins
             {
                 data = new TruePVEData();
             }
-            if (data == null)
+            if (data == null || data.schedule == null)
                 LoadDefaultConfig();
 
             dirty |= CheckConfig();
@@ -1021,15 +1027,22 @@ namespace Oxide.Plugins
             if (turret as HelicopterTurret)
                 return null;
             object extCanEntityBeTargeted = Interface.CallHook("CanEntityBeTargeted", new object[] { target, turret as BaseEntity });
-            if (extCanEntityBeTargeted != null && extCanEntityBeTargeted is bool)
+            if (extCanEntityBeTargeted != null && extCanEntityBeTargeted is bool && (bool)extCanEntityBeTargeted)
             {
-                return (bool)extCanEntityBeTargeted;
+                return null;
             }
             RuleSet ruleSet = GetRuleSet(target, turret as BaseCombatEntity);
             if (target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnoreScientist))
                 return false;
             if (ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
+            {
+                var entityLocations = GetLocationKeys(target);
+                var initiatorLocations = GetLocationKeys(turret as BaseEntity);
+                // check for exclusion zones (zones with no rules mapped)
+                if (CheckExclusion(entityLocations, initiatorLocations)) return null;
+
                 return false;
+            }
             return null;
         }
 
@@ -1039,9 +1052,9 @@ namespace Oxide.Plugins
             BasePlayer player = go.GetComponent<BasePlayer>();
             if (player == null || trap == null) return null;
             object extCanEntityTrapTrigger = Interface.CallHook("CanEntityTrapTrigger", new object[] { trap, player });
-            if (extCanEntityTrapTrigger != null && extCanEntityTrapTrigger is bool)
+            if (extCanEntityTrapTrigger != null && extCanEntityTrapTrigger is bool && (bool)extCanEntityTrapTrigger)
             {
-                return (bool)extCanEntityTrapTrigger;
+                return null;
             }
             RuleSet ruleSet = GetRuleSet(trap, player);
             if (player.IsNpc && ruleSet.HasFlag(RuleFlags.TrapsIgnoreScientist))
@@ -1374,7 +1387,7 @@ namespace Oxide.Plugins
                 if (data.schedule.broadcast && currentBroadcastMessage != null)
                 {
                     Server.Broadcast(currentBroadcastMessage, GetMessage("Prefix"));
-                    Puts(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage);
+                    Console.WriteLine(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage);
                 }
             }
 
@@ -1680,9 +1693,9 @@ namespace Oxide.Plugins
             // returns delta between current time and next schedule entry
             public void ClockUpdate(out string currentRuleSet, out string message)
             {
-                TimeSpan time = useRealtime ? new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0).Add(DateTime.Now.TimeOfDay) : TOD_Sky.Instance.Cycle.DateTime.TimeOfDay;
                 try
                 {
+                    TimeSpan time = useRealtime || TOD_Sky.Instance == null || !TOD_Sky.Instance.Initialized ? new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0).Add(DateTime.Now.TimeOfDay) : TOD_Sky.Instance.Cycle.DateTime.TimeOfDay;
                     ScheduleEntry se = null;
                     // get the most recent schedule entry
                     if (parsedEntries.Where(t => !t.isDaily).Count() > 0)
