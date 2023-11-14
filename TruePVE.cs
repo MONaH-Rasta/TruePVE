@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.0.9")]
+    [Info("TruePVE", "nivex", "2.1.0")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -431,6 +431,7 @@ namespace Oxide.Plugins
                 SendReply(player, WrapSize(12, WrapColor("red", GetMessage("Error_NoEntityFound", player.UserIDString))));
                 return;
             }
+
             Message(player, "Notify_ProdResult", new object[] { entity.GetType(), (entity as BaseEntity).ShortPrefabName });
         }
 
@@ -689,6 +690,11 @@ namespace Oxide.Plugins
                 members = "magnetcrane.entity, carshredder.entity"
             });
 
+            config.groups.Add(new EntityGroup("tugboats")
+            {
+                members = "Tugboat"
+            });
+
             // create default ruleset
             RuleSet defaultRuleSet = new RuleSet(config.defaultRuleSet)
             {
@@ -725,6 +731,7 @@ namespace Oxide.Plugins
             defaultRuleSet.AddRule("npcs can hurt players");
             defaultRuleSet.AddRule("junkyard cannot hurt anything");
             defaultRuleSet.AddRule("junkyard can hurt cars");
+            defaultRuleSet.AddRule("players cannot hurt tugboats");
 
             config.ruleSets.Add(defaultRuleSet); // add ruleset to rulesets list
 
@@ -814,7 +821,7 @@ namespace Oxide.Plugins
             SendReply(player, GetMessage("Prefix") + currentBroadcastMessage);
         }
 
-        private string CurrentRuleSetName() => currentRuleSet.name;
+        private string CurrentRuleSetName() => currentRuleSet?.name;
         private bool IsEnabled() => tpveEnabled;
 
         // handle damage - if another mod must override TruePVE damages or take priority,
@@ -896,10 +903,17 @@ namespace Oxide.Plugins
 
         private bool AllowKillingSleepers(BaseCombatEntity entity, HitInfo hitInfo)
         {
-            if (entity.ShortPrefabName == "player" && (config.AllowKillingSleepersAlly || config.AllowKillingSleepers))
+            if (entity.ShortPrefabName == "player" && (config.AllowKillingSleepersAlly || config.AllowKillingSleepers || config.AllowKillingSleepersAuthorization))
             {
                 var victim = entity.ToPlayer();
-
+                if (!victim.IsSleeping())
+                {
+                    return false;
+                }
+                if (config.AllowKillingSleepersAuthorization && hitInfo.Initiator is BasePlayer && AllowAuthorizationDamage(victim, hitInfo.InitiatorPlayer))
+                {
+                    return true;
+                }
                 if (config.AllowKillingSleepersAlly && hitInfo.Initiator is BasePlayer)
                 {
                     return victim.IsSleeping() && IsAlly(victim.userID, hitInfo.InitiatorPlayer.userID);
@@ -912,7 +926,24 @@ namespace Oxide.Plugins
             return false;
         }
 
-
+        private bool AllowAuthorizationDamage(BasePlayer victim, BasePlayer attacker)
+        {
+            if (!attacker.userID.IsSteamId())
+            {
+                return false;
+            }
+            var tugboat = victim.GetParentEntity() as Tugboat;
+            if (tugboat != null && tugboat.IsAuthed(attacker))
+            {
+                return true;
+            }
+            var priv = victim.GetBuildingPrivilege();
+            if (priv != null && priv.IsAuthed(attacker))
+            {
+                return true;
+            }
+            return false;
+        }
 
         // determines if an entity is "allowed" to take damage
         private bool AllowDamage(BaseCombatEntity entity, HitInfo hitInfo)
@@ -1125,7 +1156,7 @@ namespace Oxide.Plugins
 
                 if (entity is BuildingBlock)
                 {
-                    if (hitInfo.Initiator is MiniCopter)
+                    if (hitInfo.Initiator is Minicopter)
                     {
                         if (trace) Trace("Initiator is minicopter, target is building; evaluate and return", 1);
                         return EvaluateRules(entity, hitInfo, ruleSet);
@@ -1135,20 +1166,20 @@ namespace Oxide.Plugins
 
                     if (ruleSet.HasFlag(RuleFlags.TwigDamage) && block.grade == BuildingGrade.Enum.Twigs)
                     {
-                        bool isAllowed = !ruleSet.HasFlag(RuleFlags.TwigDamageRequiresOwnership) || IsAlly(entity.OwnerID, attacker.userID);
+                        bool isAllowed = !ruleSet.HasFlag(RuleFlags.TwigDamageRequiresOwnership) || IsAlly(entity.OwnerID, attacker.userID) || IsAuthed(block, attacker);
                         if (trace) Trace($"Initiator is player and target is twig block, with TwigDamage flag set; {(isAllowed ? "allow" : "block")} and return", 1);
                         return isAllowed;
                     }
 
                     if (ruleSet.HasFlag(RuleFlags.WoodenDamage) && block.grade == BuildingGrade.Enum.Wood)
                     {
-                        bool isAllowed = !ruleSet.HasFlag(RuleFlags.WoodenDamageRequiresOwnership) || IsAlly(entity.OwnerID, attacker.userID);
+                        bool isAllowed = !ruleSet.HasFlag(RuleFlags.WoodenDamageRequiresOwnership) || IsAlly(entity.OwnerID, attacker.userID) || IsAuthed(block, attacker);
                         if (trace) Trace($"Initiator is player and target is wood block, with WoodenDamage flag set; {(isAllowed ? "allow" : "block")} and return", 1);
                         return isAllowed;
                     }
                 }
 
-                if (ruleSet.HasFlag(RuleFlags.NoPlayerDamageToMini) && entity is MiniCopter && !(entity is ScrapTransportHelicopter))
+                if (ruleSet.HasFlag(RuleFlags.NoPlayerDamageToMini) && entity is Minicopter)
                 {
                     if (trace) Trace("Initiator is player and target is MiniCopter, with NoPlayerDamageToMini flag set; block and return", 1);
                     return false;
@@ -1203,27 +1234,60 @@ namespace Oxide.Plugins
                 }
                 else if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !isVictim && !entity.IsNpc && attacker.userID.IsSteamId())
                 { // ignore checks if authorized damage enabled (except for players and npcs)
+                    if (config.SleepingBags && entity is SleepingBag)
+                    {
+                        if (trace) Trace("Initiator is player and target is sleeping bag; allow and return", 1);
+                        return true;
+                    }
+
+                    if (config.Campfires && entity.name.Contains("campfire"))
+                    {
+                        if (trace) Trace("Initiator is player and target is campfire; allow and return", 1);
+                        return true;
+                    }
+
+                    if (config.Ladders && entity is BaseLadder)
+                    {
+                        if (trace) Trace("Initiator is player and target is ladder; allow and return", 1);
+                        return true;
+                    }
+
                     if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && !IsAlly(entity.OwnerID, attacker.userID) && CanAuthorize(entity, attacker, ruleSet))
                     {
-                        if (trace) Trace("Initiator is player who does not own non-player target; block and return", 1);
+                        if (trace) Trace("Initiator is player who does not own the target; block and return", 1);
                         return false;
                     }
 
-                    if (CheckAuthorized(entity, attacker, ruleSet))
+                    bool cupboardOwnership = ruleSet.HasFlag(RuleFlags.CupboardOwnership);
+
+                    if (CheckAuthorized(entity, attacker, ruleSet, cupboardOwnership))
                     {
                         if (entity is SamSite || entity.name.Contains("modular") || entity is BaseMountable)
                         {
                             if (trace) Trace($"Target is {entity.GetType().Name}; evaluate and return", 1);
                             return EvaluateRules(entity, hitInfo, ruleSet);
                         }
-                        if (trace) Trace("Initiator is player with authorization over non-player target; allow and return", 1);
+                        if (trace) Trace("Initiator is player with authorization over target; allow and return", 1);
                         return true;
+                    }
+                    if (cupboardOwnership)
+                    {
+                        if (trace) Trace("Initiator is player without authorization over target; block and return", 1);
+                        return false;
                     }
                 }
             }
 
             if (trace) Trace("No match in pre-checks; evaluating RuleSet rules...", 1);
             return EvaluateRules(entity, hitInfo, ruleSet);
+        }
+
+        private bool IsAuthed(BuildingBlock block, BasePlayer attacker)
+        {
+            var building = block.GetBuilding();
+            if (building == null) return false;
+            var priv = building.GetDominatingBuildingPrivilege();
+            return priv != null && priv.IsAuthed(attacker);
         }
 
         private void TrySetInitiator(HitInfo hitInfo, BaseEntity weapon)
@@ -1316,7 +1380,7 @@ namespace Oxide.Plugins
 
             if (entity.OwnerID == 0)
             {
-                return entity is MiniCopter;
+                return entity is Minicopter;
             }
 
             return IsPlayerEntity(entity);
@@ -1394,9 +1458,9 @@ namespace Oxide.Plugins
         }
 
         // checks if the player is authorized to damage the entity
-        private bool CheckAuthorized(BaseEntity entity, BasePlayer player, RuleSet ruleSet)
+        private bool CheckAuthorized(BaseEntity entity, BasePlayer player, RuleSet ruleSet, bool cupboardOwnership)
         {
-            if (!ruleSet.HasFlag(RuleFlags.CupboardOwnership))
+            if (!cupboardOwnership)
             {
                 return entity.OwnerID == 0 || IsAlly(entity.OwnerID, player.userID); // allow damage to entities that the player owns
             }
@@ -2102,8 +2166,16 @@ namespace Oxide.Plugins
             public bool AllowKillingSleepers;
             [JsonProperty(PropertyName = "Allow Killing Sleepers (Ally Only)")]
             public bool AllowKillingSleepersAlly;
+            [JsonProperty(PropertyName = "Allow Killing Sleepers (Authorization Only)")]
+            public bool AllowKillingSleepersAuthorization;
             [JsonProperty(PropertyName = "Ignore Firework Damage")]
             public bool Firework = true;
+            [JsonProperty(PropertyName = "Ignore Campfire Damage")]
+            public bool Campfires;
+            [JsonProperty(PropertyName = "Ignore Ladder Damage")]
+            public bool Ladders;
+            [JsonProperty(PropertyName = "Ignore Sleeping Bag Damage")]
+            public bool SleepingBags;
             Dictionary<NetworkableId, List<string>> groupCache = new Dictionary<NetworkableId, List<string>>();
 
             public void Init()
