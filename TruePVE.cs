@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "0.9.9", ResourceId = 1789)]
+    [Info("TruePVE", "RFC1920", "1.0.3", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -625,6 +625,7 @@ namespace Oxide.Plugins
         // set handleDamage to false and reference HandleDamage from the other mod(s)
         object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitinfo)
         {
+            //if(entity == null || hitinfo == null || hitinfo.HitEntity == null) return null;
             if(!data.config[Option.handleDamage])
                 return null;
             return HandleDamage(entity, hitinfo);
@@ -890,6 +891,7 @@ namespace Oxide.Plugins
         // to determine whether to prevent gathering, based on rules
         object OnPlayerAttack(BasePlayer attacker, HitInfo hitinfo)
         {
+            if(attacker == null || hitinfo == null || hitinfo.HitEntity == null) return null;
             if(hitinfo?.HitEntity is ResourceEntity)
             {
                 if (!AllowDamage(hitinfo.HitEntity, hitinfo))
@@ -928,6 +930,7 @@ namespace Oxide.Plugins
         // Check exclusion for entities
         bool CheckExclusion(BaseEntity entity0, BaseEntity entity1)
         {
+            if(!serverInitialized) return false;
             // check for exclusion zones (zones with no rules mapped)
             List<string> e0Locations = GetLocationKeys(entity0);
             List<string> e1Locations = GetLocationKeys(entity1);
@@ -973,6 +976,7 @@ namespace Oxide.Plugins
 
         RuleSet GetRuleSet(BaseEntity e0, BaseEntity e1)
         {
+            //if(!serverInitialized) return List<string>;
             List<string> e0Locations = GetLocationKeys(e0);
             List<string> e1Locations = GetLocationKeys(e1);
 
@@ -982,12 +986,14 @@ namespace Oxide.Plugins
         // get locations shared between the two passed location lists
         List<string> GetSharedLocations(List<string> e0Locations, List<string> e1Locations)
         {
+            //if(!serverInitialized) return List<string>;
             return e0Locations.Intersect(e1Locations).Where(s => data.HasMapping(s)).ToList();
         }
 
         // Check exclusion for given entity locations
         bool CheckExclusion(List<string> e0Locations, List<string> e1Locations)
         {
+            if(!serverInitialized) return false;
             if (e0Locations == null || e1Locations == null)
             {
                 if (trace) Trace("No shared locations (empty location) - no exclusions", 3);
@@ -1010,6 +1016,7 @@ namespace Oxide.Plugins
         // add or update a mapping
         bool AddOrUpdateMapping(string key, string ruleset)
         {
+            if(!serverInitialized) return false;
             if (string.IsNullOrEmpty(key))
                 return false;
             if (ruleset == null || (!data.ruleSets.Select(r => r.name).Contains(ruleset) && ruleset != "exclude"))
@@ -1029,6 +1036,7 @@ namespace Oxide.Plugins
         // remove a mapping
         bool RemoveMapping(String key)
         {
+            if(!serverInitialized) return false;
             if (string.IsNullOrEmpty(key))
                 return false;
             if (data.HasMapping(key))
@@ -1130,7 +1138,8 @@ namespace Oxide.Plugins
         // get location keys from ZoneManager (zone IDs) or LiteZones (zone names)
         private List<string> GetLocationKeys(BaseEntity entity)
         {
-            if(!useZones || entity == null) return null;
+            if(!useZones) return null;
+            if(entity == null) return null;
             List<string> locations = new List<string>();
             string zname = null;
             if (ZoneManager != null)
@@ -1490,6 +1499,7 @@ namespace Oxide.Plugins
                 }
             }
             List<string> memberList = new List<string>();
+
             public string exclusions
             {
                 get {
@@ -1498,7 +1508,7 @@ namespace Oxide.Plugins
                 }
                 set {
                     if (value == null || value.Equals("")) return;
-                    memberList = value.Split(',').Select(s => s.Trim()).ToList();
+                    exclusionList = value.Split(',').Select(s => s.Trim()).ToList();
                 }
             }
             List<string> exclusionList = new List<string>();
