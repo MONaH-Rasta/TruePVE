@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.7", ResourceId = 1789)]
+    [Info("TruePVE", "RFC1920", "0.9.8", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -62,7 +62,8 @@ namespace Oxide.Plugins
             TrapsIgnorePlayers = 1 << 10,
             TurretsIgnorePlayers = 1 << 11,
             CupboardOwnership = 1 << 12,
-            SelfDamage = 1 << 13
+            SelfDamage = 1 << 13,
+            TwigDamage = 1 << 14
         }
         // timer to check for schedule updates
         Timer scheduleUpdateTimer;
@@ -854,6 +855,21 @@ namespace Oxide.Plugins
         // checks if the player is authorized to damage the entity
         bool CheckAuthorized(BaseEntity entity, BasePlayer player, RuleSet ruleSet)
         {
+            // Allow twig damage by anyone if ruleset flag is set
+            if(ruleSet.HasFlag(RuleFlags.TwigDamage))
+            {
+                try
+                {
+                    var block = entity as BuildingBlock;
+                    if(block.grade == BuildingGrade.Enum.Twigs)
+                    {
+                        if(trace) Trace("Allowing twig destruction...");
+                        return true;
+                    }
+                }
+                catch {}
+            }
+
             // check if the player is the owner of the entity
             if ((!ruleSet.HasFlag(RuleFlags.CupboardOwnership) && player.userID == entity.OwnerID) || entity.OwnerID == 0L)
                 return true; // player is the owner or the owner is undefined, allow damage/looting
@@ -1114,7 +1130,8 @@ namespace Oxide.Plugins
         // get location keys from ZoneManager (zone IDs) or LiteZones (zone names)
         private List<string> GetLocationKeys(BaseEntity entity)
         {
-            if(!useZones || entity == null) return null;
+            if(!useZones) return null;
+            if(entity == null) return null;
             List<string> locations = new List<string>();
             string zname = null;
             if (ZoneManager != null)
