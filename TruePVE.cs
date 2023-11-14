@@ -10,10 +10,23 @@ using System.Text.RegularExpressions;
 using UnityEngine;
 
 /*
+    1.1.7:
+    Fixed NoTurretDamagePlayer
+    TurretsIgnorePlayers now excludes turrets using instruments
+    TruePVE now negates blocked damage entirely
+        Use CanEntityTakeDamage(BaseEntity entity, HitInfo info) to bypass this
+    Incompatibility with DynamicPVP is still being looked at
+
+    1.1.5:
+    Fix for TurretsIgnorePlayers still ignoring npcs
+    Incompatibility with DynamicPVP is still being looked at
+
     1.1.4:
     Added MiniCopterIsImmuneToCollision flag
     Added null checks to ClockUpdate to prevent NRE, however this does not solve the issue
     Changed the behavior of TurretsIgnorePlayers to only ignore players, and not npcs. Use TurretsIgnoreScientist to have turrets ignore all npcs
+    Increased the prune layer by 15 meters
+    Increased the minimum distance from monuments by 15 meters
 
     1.1.3:
     CanEntityBeTargeted hook now returns null if true
@@ -45,7 +58,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.1.5")]
+    [Info("TruePVE", "RFC1920", "1.1.7")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -693,11 +706,12 @@ namespace Oxide.Plugins
         {
             //if(entity == null || hitinfo == null || hitinfo.HitEntity == null) return null;
             if (hitinfo.damageTypes.Has(Rust.DamageType.Decay)) return null;
-            if (!tpveEnabled)
-                return null;
-            if (!data.config[Option.handleDamage])
-                return null;
-            return HandleDamage(entity, hitinfo);
+            if (!tpveEnabled) return null;
+            if (!data.config[Option.handleDamage]) return null;
+            var success = HandleDamage(entity, hitinfo);
+            if (success == null || !(bool)success) return null;
+            hitinfo.damageTypes = new DamageTypeList();
+            return true;
         }
 
         // handle damage
@@ -818,7 +832,6 @@ namespace Oxide.Plugins
 
             // check heli and turret
             object heli = CheckHeliInitiator(ruleSet, hitinfo);
-            object turret = CheckTurretInitiator(ruleSet, hitinfo);
             if (heli != null)
             {
                 if (entity is BasePlayer)
@@ -834,6 +847,7 @@ namespace Oxide.Plugins
                 if (trace) Trace($"Initiator is heli, target is non-player; results: { ((bool)heli ? "allow and return" : "block and return") }", 1);
                 return (bool)heli;
             }
+            object turret = CheckTurretInitiator(ruleSet, hitinfo);
             if (turret != null)
             {
                 if (entity is Scientist)
@@ -974,7 +988,7 @@ namespace Oxide.Plugins
         object CheckTurretInitiator(RuleSet ruleSet, HitInfo hitinfo)
         {
             // Check for turret initiator
-            var turret = hitinfo.Weapon?.GetComponentInParent<AutoTurret>();
+            var turret = hitinfo.Weapon?.GetComponentInParent<AutoTurret>() ?? hitinfo.Initiator as AutoTurret;
             if (turret != null)
             {
                 if (trace) Trace("Found WeaponPrefab in a turret", 2);
@@ -1048,11 +1062,12 @@ namespace Oxide.Plugins
                 return false;
             if (!target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
             {
+                var weapon = turret.GetComponent<AutoTurret>()?.GetAttachedWeapon()?.GetItem();
+                if (weapon != null && weapon.info.shortname.StartsWith("fun.")) return null;
                 var entityLocations = GetLocationKeys(target);
                 var initiatorLocations = GetLocationKeys(turret as BaseEntity);
                 // check for exclusion zones (zones with no rules mapped)
                 if (CheckExclusion(entityLocations, initiatorLocations)) return null;
-
                 return false;
             }
             return null;
