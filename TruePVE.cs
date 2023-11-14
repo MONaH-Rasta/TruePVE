@@ -10,7 +10,19 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
+// fix scrap heli
+
 /*
+    1.1.9:
+    Added config protection to prevent invalid configs from being reset. Use the message in the server console to debug the error as some json validators fail to detect specific errors!
+    Added IsEnabled API
+    Added CarsImmunity flag - prevent cars from taking damage from collisions
+    Added MiniCannotHurtPlayers flag - prevent mini and scrap from hurting players
+    Added AuthorizedDamageRequiresOwnership flag
+    Added TwigDamageRequiresOwnership flag
+    Added `Allow Killing Sleepers` (false)
+    Trapped OnEntityTakeDamage.KeyNotFoundException
+    
     1.1.8:
     Added API - bool ResetRules(string key)
     Added flag SamSitesIgnorePlayers
@@ -64,7 +76,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.1.8")]
+    [Info("TruePVE", "RFC1920", "1.1.95")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -126,7 +138,11 @@ namespace Oxide.Plugins
             TrapsIgnoreScientist = 1 << 19,
             MiniCopterIsImmuneToCollision = 1 << 20,
             //HeliCanDamageTwig = 1 << 21,
-            SamSitesIgnorePlayers = 1 << 22
+            SamSitesIgnorePlayers = 1 << 22,
+            MiniCannotHurtPlayers = 1 << 23,
+            TwigDamageRequiresOwnership = 1 << 24,
+            AuthorizedDamageRequiresOwnership = 1 << 25,
+            CarsImmunity = 1 << 26,
         }
 
         // timer to check for schedule updates
@@ -519,6 +535,12 @@ namespace Oxide.Plugins
             {
                 data = Config.ReadObject<TruePVEData>() ?? null;
             }
+            catch (JsonException ex)
+            {
+                Puts(ex.StackTrace);
+                Puts(ex.Message);
+                return;
+            }
             catch (Exception)
             {
                 data = new TruePVEData();
@@ -726,6 +748,8 @@ namespace Oxide.Plugins
                 SendReply(player, GetMessage("Prefix") + currentBroadcastMessage);
         }
 
+        private bool IsEnabled() => tpveEnabled;
+
         // handle damage - if another mod must override TruePVE damages or take priority,
         // set handleDamage to false and reference HandleDamage from the other mod(s)
         object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitInfo)
@@ -733,8 +757,8 @@ namespace Oxide.Plugins
             //if(entity == null || hitInfo == null || hitInfo.HitEntity == null) return null;
             if (hitInfo.damageTypes.Has(Rust.DamageType.Decay)) return null;
             if (!tpveEnabled) return null;
-            if (!data.config[Option.handleDamage]) return null;
-            //if (data.AllowKillingSleepers && entity is BasePlayer && entity.ToPlayer().IsSleeping()) return null;
+            try { if (data.config.ContainsKey(Option.handleDamage) && !data.config[Option.handleDamage]) return null; } catch { }
+            if (data.AllowKillingSleepers && entity is BasePlayer && entity.ToPlayer().IsSleeping()) return null;
             var handleDamage = HandleDamage(entity, hitInfo);
             if (handleDamage is bool)
             {
@@ -773,6 +797,9 @@ namespace Oxide.Plugins
             // allow NPCs to take damage
             if (entity is BaseNpc)
                 return true;
+
+            if (entity is BaseRidableAnimal)
+                return !entity.OwnerID.IsSteamId();
 
             // allow damage to door barricades and covers
             if (entity is Barricade && (entity.ShortPrefabName.Contains("door_barricade") || entity.ShortPrefabName.Contains("cover")))
@@ -816,16 +843,33 @@ namespace Oxide.Plugins
             List<string> entityLocations = GetLocationKeys(entity);
             List<string> initiatorLocations = GetLocationKeys(hitInfo.Initiator);
             // check for exclusion zones (zones with no rules mapped)
-            if (CheckExclusion(entityLocations, initiatorLocations)) return true;
+            
 
             if (trace) Trace("No exclusion found - looking up RuleSet...", 1);
             // process location rules
             RuleSet ruleSet = GetRuleSet(entityLocations, initiatorLocations);
             if (trace) Trace($"Using RuleSet \"{ruleSet.name}\"", 1);
 
+            if (entity is ModularCar || entity is BasicCar || hitInfo.Initiator is ModularCar || hitInfo.Initiator is BasicCar || entity.PrefabName.Contains("modularcar") || hitInfo.Initiator != null && hitInfo.Initiator.PrefabName.Contains("modularcar"))
+            {
+                if (ruleSet.HasFlag(RuleFlags.CarsImmunity))
+                {
+                    if (trace) Trace("Car had a collision; block and return", 1);
+                    return false;
+                }
+                
+                return false;
+            }
+            if (CheckExclusion(entityLocations, initiatorLocations)) return true;
             if (entity is MiniCopter && hitInfo.Initiator == entity && ruleSet.HasFlag(RuleFlags.MiniCopterIsImmuneToCollision))
             {
                 if (trace) Trace("Minicopter had a collision; block and return", 1);
+                return false;
+            }
+
+            if (entity is BasePlayer && hitInfo.Initiator is MiniCopter && ruleSet.HasFlag(RuleFlags.MiniCannotHurtPlayers))
+            {
+                if (trace) Trace("Initiator is scrap heli, and target is player; block and return", 1);
                 return false;
             }
 
@@ -923,15 +967,24 @@ namespace Oxide.Plugins
 
             var player = GetPlayerFromHitInfo(hitInfo);
             // ignore checks if authorized damage enabled (except for players)
-            if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !(entity is BasePlayer) && player.IsValid() && CheckAuthorized(entity, player, ruleSet))
+            if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !(entity is BasePlayer) && player.IsValid())
             {
-                if (entity is SamSite)
+                if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && entity.OwnerID.IsSteamId() && entity.OwnerID != player.userID)
                 {
-                    if (trace) Trace("Target is SamSite; evaluate and return", 1);
-                    return EvaluateRules(entity, hitInfo, ruleSet);
+                    if (trace) Trace("Initiator is player who does not own non-player target; block and return", 1);
+                    return false;
                 }
-                if (trace) Trace("Initiator is player with authorization over non-player target; allow and return", 1);
-                return true;
+
+                if (CheckAuthorized(entity, player, ruleSet))
+                {
+                    if (entity is SamSite)
+                    {
+                        if (trace) Trace("Target is SamSite; evaluate and return", 1);
+                        return EvaluateRules(entity, hitInfo, ruleSet);
+                    }
+                    if (trace) Trace("Initiator is player with authorization over non-player target; allow and return", 1);
+                    return true;
+                }
             }
 
             // allow sleeper damage by admins if configured
@@ -1076,6 +1129,12 @@ namespace Oxide.Plugins
                     var block = entity as BuildingBlock;
                     if (block.grade == BuildingGrade.Enum.Twigs)
                     {
+                        if (ruleSet.HasFlag(RuleFlags.TwigDamageRequiresOwnership) && block.OwnerID != player.userID)
+                        {
+                            if (trace) Trace("Blocking twig destruction...attacker is not block owner");
+                            return false;
+                        }
+
                         if (trace) Trace("Allowing twig destruction...");
                         return true;
                     }
@@ -1586,8 +1645,8 @@ namespace Oxide.Plugins
             public List<RuleSet> ruleSets = new List<RuleSet>();
             [JsonProperty(PropertyName = "Entity Groups")]
             public List<EntityGroup> groups { get; set; } = new List<EntityGroup>();
-            //[JsonProperty(PropertyName = "Allow Killing Sleepers")]
-            //public bool AllowKillingSleepers;
+            [JsonProperty(PropertyName = "Allow Killing Sleepers")]
+            public bool AllowKillingSleepers;
 
             Dictionary<uint, List<string>> groupCache = new Dictionary<uint, List<string>>();
 
