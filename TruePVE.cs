@@ -45,7 +45,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.1.4")]
+    [Info("TruePVE", "RFC1920", "1.1.5")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -1046,7 +1046,7 @@ namespace Oxide.Plugins
             RuleSet ruleSet = GetRuleSet(target, turret as BaseCombatEntity);
             if (target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnoreScientist))
                 return false;
-            if (ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
+            if (!target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
             {
                 var entityLocations = GetLocationKeys(target);
                 var initiatorLocations = GetLocationKeys(turret as BaseEntity);
