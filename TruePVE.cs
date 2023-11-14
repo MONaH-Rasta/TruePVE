@@ -10,6 +10,11 @@ using System.Text.RegularExpressions;
 using UnityEngine;
 
 /*
+    1.1.4:
+    Added MiniCopterIsImmuneToCollision flag
+    Added null checks to ClockUpdate to prevent NRE, however this does not solve the issue
+    Changed the behavior of TurretsIgnorePlayers to only ignore players, and not npcs. Use TurretsIgnoreScientist to have turrets ignore all npcs
+
     1.1.3:
     CanEntityBeTargeted hook now returns null if true
     CanEntityTrapTrigger hook now returns null if true
@@ -40,7 +45,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.1.3")]
+    [Info("TruePVE", "RFC1920", "1.1.4")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -99,7 +104,8 @@ namespace Oxide.Plugins
             NoHeliDamageQuarry = 1 << 16,
             NoTurretDamageScientist = 1 << 17,
             TurretsIgnoreScientist = 1 << 18,
-            TrapsIgnoreScientist = 1 << 19
+            TrapsIgnoreScientist = 1 << 19,
+            MiniCopterIsImmuneToCollision = 1 << 20
         }
 
         // timer to check for schedule updates
@@ -766,6 +772,7 @@ namespace Oxide.Plugins
                     Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
                 }
             }
+
             // get entity and initiator locations (zones)
             List<string> entityLocations = GetLocationKeys(entity);
             List<string> initiatorLocations = GetLocationKeys(hitinfo.Initiator);
@@ -776,6 +783,11 @@ namespace Oxide.Plugins
             // process location rules
             RuleSet ruleSet = GetRuleSet(entityLocations, initiatorLocations);
             if (trace) Trace($"Using RuleSet \"{ruleSet.name}\"", 1);
+
+            if (entity is MiniCopter && hitinfo.Initiator == entity && ruleSet.HasFlag(RuleFlags.MiniCopterIsImmuneToCollision))
+            {
+                return false;
+            }
 
             // handle suicide
             if (hitinfo.damageTypes.Get(DamageType.Suicide) > 0)
@@ -1387,7 +1399,7 @@ namespace Oxide.Plugins
                 if (data.schedule.broadcast && currentBroadcastMessage != null)
                 {
                     Server.Broadcast(currentBroadcastMessage, GetMessage("Prefix"));
-                    Console.WriteLine(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage);
+                    Puts(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage);
                 }
             }
 
@@ -1693,9 +1705,10 @@ namespace Oxide.Plugins
             // returns delta between current time and next schedule entry
             public void ClockUpdate(out string currentRuleSet, out string message)
             {
+                TimeSpan time = useRealtime ? new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0).Add(DateTime.Now.TimeOfDay) : TOD_Sky.Instance.Cycle.DateTime.TimeOfDay;
                 try
                 {
-                    TimeSpan time = useRealtime || TOD_Sky.Instance == null || !TOD_Sky.Instance.Initialized ? new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0).Add(DateTime.Now.TimeOfDay) : TOD_Sky.Instance.Cycle.DateTime.TimeOfDay;
+
                     ScheduleEntry se = null;
                     // get the most recent schedule entry
                     if (parsedEntries.Where(t => !t.isDaily).Count() > 0)
@@ -1707,6 +1720,7 @@ namespace Oxide.Plugins
                         try
                         {
                             daily = parsedEntries.FirstOrDefault(e => e.time == parsedEntries.Where(t => t.valid && t.time <= DateTime.Now.TimeOfDay && t.isDaily).Max(t => t.time));
+
                         }
                         catch (Exception)
                         { // no daily entries
@@ -1731,6 +1745,7 @@ namespace Oxide.Plugins
                         try
                         {
                             daily = parsedEntries.FirstOrDefault(e => e.time == parsedEntries.Where(t => t.valid && t.isDaily).Max(t => t.time));
+
                         }
                         catch (Exception)
                         { // no daily entries
@@ -1740,8 +1755,8 @@ namespace Oxide.Plugins
                         if (daily != null && daily.time.Add(new TimeSpan((int)DateTime.Now.DayOfWeek, 0, 0, 0)) > se.time)
                             se = daily;
                     }
-                    currentRuleSet = se.ruleSet;
-                    message = se.message;
+                    currentRuleSet = se?.ruleSet;
+                    message = se?.message;
                 }
             }
         }
