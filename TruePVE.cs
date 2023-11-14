@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "ignignokt84", "0.9.4", ResourceId = 1789)]
+    [Info("TruePVE", "ignignokt84", "0.9.5", ResourceId = 1789)]
     [Description("Improvement of the default Rust PVE behavior")]
     class TruePVE : RustPlugin
     {
@@ -1127,10 +1127,7 @@ namespace Oxide.Plugins
                         string[] zmlocplr = (string[]) ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
                         foreach(string s in zmlocplr)
                         {
-                            zname = (string) ZoneManager.Call("GetZoneName", s);
-                            if(zname != null) zmloc.Add(zname);
                             zmloc.Add(s);
-                            if(trace) Puts($"Found zone {zname}:{s}");
                         }
                     }
                     else
@@ -1138,24 +1135,46 @@ namespace Oxide.Plugins
                         string[] zmlocent = (string[]) ZoneManager.Call("GetEntityZoneIDs", new object[] { entity });
                         foreach(string s in zmlocent)
                         {
-                            zname = (string) ZoneManager.Call("GetZoneName", s);
-                            if(zname != null) zmloc.Add(zname);
                             zmloc.Add(s);
-                            if(trace) Puts($"Found zone {zname}:{s}");
                         }
                     }
                 }
-                else if(ZoneManager.Version == new VersionNumber(3, 0, 0))
+                else if(ZoneManager.Version < new VersionNumber(3, 0, 0))
+                {
+                    if(entity is BasePlayer)
+                    {
+                        string[] zmlocplr = (string[]) ZoneManager.Call("GetPlayerZoneIDs", new object[] { entity as BasePlayer });
+                        foreach(string s in zmlocplr)
+                        {
+                            zmloc.Add(s);
+                        }
+                    }
+                    else
+                    {
+                        zmloc = (List<string>)ZoneManager.Call("GetEntityZones", new object[] { entity });
+                    }
+                }
+                else // Skip ZM version 3.0.0
                 {
                     zmloc = null;
-                }
-                else
-                {
-                    zmloc = (List<string>)ZoneManager.Call("GetEntityZones", new object[] { entity });
                 }
 
                 if(zmloc != null && zmloc.Count > 0)
                 {
+                    // Add names into list of ID numbers
+                    List<string> zmout = new List<string>();
+                    foreach(string s in zmloc)
+                    {
+                        zmout.Add(s);
+                        zname = (string) ZoneManager.Call("GetZoneName", s);
+                        if(zname != null) zmout.Add(zname);
+                        if(trace) Puts($"Found zone {zname}: {s}");
+                    }
+                    if(zmout != null)
+                    {
+                        zmloc = zmout;
+                        zmout.Clear();
+                    }
                     locations.AddRange(zmloc);
                 }
             }
