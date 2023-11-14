@@ -10,16 +10,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-/*
-Fixed players not being able to suicide (you can remove SelfDamage flag if you added it only for this issue)
-Added support for TruePVE to be used on PVP servers that want to add PVE zones via Zone Manager
-Added API TruePVE.Call<string>("CurrentRuleSetName");
-Removed no owner check from AuthorizedDamageRequiresOwnership - useful for blocking damage to your unowned mini etc
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.0.3")]
+    [Info("TruePVE", "nivex", "2.0.4")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -235,11 +228,14 @@ namespace Oxide.Plugins
         // server initialized
         private void OnServerInitialized()
         {
+            if (!isLoaded)
+            {
+                Puts("Plugin has been disabled.");
+                return;
+            }
             // check for server pve setting
-            if (ConVar.Server.pve)
-                WarnPve();
+            if (ConVar.Server.pve) WarnPve();
             // load configuration
-            LoadConfiguration();
             data.Init();
             currentRuleSet = data.GetDefaultRuleSet();
             if (currentRuleSet == null) 
@@ -286,7 +282,15 @@ namespace Oxide.Plugins
                         HandleScheduleSet(arg);
                         return;
                     case Command.trace:
+                        /*if (arg.HasArgs())
+                        {
+                            if (!arg.Args[0].IsSteamId() || !ulong.TryParse(arg.Args[0], out traceUserID))
+                            {
+                                traceUserID = arg.Connection?.userid ?? 0uL;
+                            }
+                        }*/
                         trace = !trace;
+                        //if (!trace) traceUserID = 0uL;
                         SendMessage(arg, "Notify_TraceToggle", new object[] { trace ? "on" : "off" });
                         if (trace)
                             traceTimer = timer.In(traceTimeout, () => trace = false);
@@ -478,38 +482,49 @@ namespace Oxide.Plugins
         #endregion
 
         #region Configuration/Data
+
+        private bool isLoaded;
+
         // load config
-        private void LoadConfiguration()
-        {
-            CheckVersion();
-            Config.Settings.NullValueHandling = NullValueHandling.Include;
+        protected override void LoadConfig()
+        {   
             bool dirty = false;
+
             try
             {
+                base.LoadConfig();
+
+                CheckVersion();
+
                 data = Config.ReadObject<TruePVEData>();
             }
             catch (Exception ex)
             {
-                Puts(ex.Message); 
-                Puts(ex.StackTrace);
+                Puts(ex.Message);
                 return;
             }
+
             if (data == null || data.schedule == null)
             {
                 LoadDefaultConfig();
             }
+            
             dirty |= CheckConfig();
             dirty |= CheckData();
+            
             // check config version, update version to current version
             if (data.configVersion == null || !data.configVersion.Equals(Version.ToString()))
             {
                 data.configVersion = Version.ToString();
                 dirty |= true;
             }
+            
             if (dirty)
             {
                 SaveData();
             }
+
+            isLoaded = true;
         }
 
         // save data
@@ -571,6 +586,7 @@ namespace Oxide.Plugins
             LoadDefaultConfiguration();
             LoadDefaultData();
             SaveData();
+            Puts("Created new configuration file.");
         }
 
         private void CheckVersion()
@@ -664,7 +680,7 @@ namespace Oxide.Plugins
 
             data.groups.Add(new EntityGroup("npcs")
             {
-                members = "ch47scientists.entity, BradleyAPC, HTNAnimal, HTNPlayer, HumanNPC, NPCMurderer, NPCPlayer, Scientist, ScientistNPC, Zombie"
+                members = "ch47scientists.entity, BradleyAPC, HTNAnimal, HTNPlayer, HumanNPC, NPCMurderer, NPCPlayer, Scientist, ScientistNPC, TunnelDweller, Zombie"
             });
 
             data.groups.Add(new EntityGroup("players")
@@ -707,7 +723,7 @@ namespace Oxide.Plugins
             defaultRuleSet.AddRule("nothing can hurt ch47");
             defaultRuleSet.AddRule("nothing can hurt cars");
             defaultRuleSet.AddRule("nothing can hurt mini");
-            defaultRuleSet.AddRule("nothing can hurt guards");
+            //defaultRuleSet.AddRule("nothing can hurt guards");
             defaultRuleSet.AddRule("nothing can hurt ridablehorses");
             defaultRuleSet.AddRule("cars cannot hurt anything");
             defaultRuleSet.AddRule("mini cannot hurt anything");
@@ -722,7 +738,7 @@ namespace Oxide.Plugins
             defaultRuleSet.AddRule("barricades cannot hurt players");
             defaultRuleSet.AddRule("mini cannot hurt mini");
             defaultRuleSet.AddRule("npcs can hurt players");
-
+            
             data.ruleSets.Add(defaultRuleSet); // add ruleset to rulesets list
 
             data.mappings[data.defaultRuleSet] = data.defaultRuleSet; // create mapping for ruleset
@@ -753,6 +769,20 @@ namespace Oxide.Plugins
         }
         #endregion
 
+        #region Trace
+        private void Trace(string message, int indentation = 0)
+        {
+            sb.AppendLine("".PadLeft(indentation, ' ') + message);
+        }
+        private void LogTrace()
+        {
+            LogToFile(traceFile, sb.ToString(), this);
+            sb.Length = 0;
+        }
+        private StringBuilder sb = new StringBuilder();
+        //private ulong traceUserID;
+        #endregion Trace
+
         #region Hooks/Handler Procedures
         private void OnPlayerConnected(BasePlayer player)
         {
@@ -764,16 +794,7 @@ namespace Oxide.Plugins
 
         private string CurrentRuleSetName() => currentRuleSet.name;
         private bool IsEnabled() => tpveEnabled;
-        private void Trace(string message, int indentation = 0) 
-        {
-            sb.AppendLine("".PadLeft(indentation, ' ') + message);
-        }
-        private void LogTrace()
-        {
-            LogToFile(traceFile, sb.ToString(), this);
-            sb.Length = 0;
-        }
-        private StringBuilder sb = new StringBuilder();
+
         // handle damage - if another mod must override TruePVE damages or take priority,
         // set handleDamage to false and reference HandleDamage from the other mod(s)
         private object OnEntityTakeDamage(ResourceEntity entity, HitInfo hitInfo)
@@ -816,8 +837,8 @@ namespace Oxide.Plugins
                 {
                     return null;
                 }
-                
-                hitInfo.damageTypes = new DamageTypeList();
+
+                CancelHit(hitInfo);
                 return true;
             }
             
@@ -829,12 +850,22 @@ namespace Oxide.Plugins
             if (!AllowDamage(entity, hitInfo))
             {
                 if (trace) LogTrace();
-                hitInfo.damageTypes = new DamageTypeList();
+                CancelHit(hitInfo);
                 return true;
             }
             
             if (trace) LogTrace();
             return null;
+        }
+
+        private void CancelHit(HitInfo hitInfo)
+        {
+            hitInfo.damageTypes = new DamageTypeList();
+            hitInfo.HitMaterial = 0;
+            hitInfo.PointStart = Vector3.zero;
+            hitInfo.HitEntity = null;
+            hitInfo.DidHit = false;
+            hitInfo.DoHitEffects = false;
         }
 
         private bool OptionHandleDamage()
@@ -951,6 +982,19 @@ namespace Oxide.Plugins
                 return true;
             }
             
+            if (ruleSet.HasFlag(RuleFlags.SamSitesIgnorePlayers) && hitInfo.Initiator is SamSite)
+            {
+                var player = entity is BaseMountable ? GetMountedPlayer(entity as BaseMountable) : entity as BasePlayer;
+
+                if (player.IsValid())
+                {
+                    // check for exclusions in entity groups
+                    bool hasExclusion = CheckExclusion(player, hitInfo.Initiator);
+                    if (trace) Trace($"Initiator is samsite, and target is player; {(hasExclusion ? "exclusion found; allow and return" : "no exclusion; block and return")}", 1);
+                    return hasExclusion;
+                }
+            }
+
             // handle suicide
             if (hitInfo.damageTypes?.Get(DamageType.Suicide) > 0 && !entity.IsNpc && entity is BasePlayer)
             {
@@ -1067,7 +1111,7 @@ namespace Oxide.Plugins
                 }
                 else if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !entity.IsNpc) // ignore checks if authorized damage enabled (except for players and npcs)
                 {
-                    if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && entity.OwnerID != attacker.userID)
+                    if (ruleSet.HasFlag(RuleFlags.AuthorizedDamageRequiresOwnership) && entity.OwnerID != attacker.userID && !(entity is BradleyAPC))
                     {
                         if (trace) Trace("Initiator is player who does not own non-player target; block and return", 1);
                         return false;
@@ -1201,7 +1245,7 @@ namespace Oxide.Plugins
                 {
                     return null;
                 }
-
+                
                 ss.CancelInvoke(ss.WeaponTick);
                 return false;
             }
@@ -1217,10 +1261,19 @@ namespace Oxide.Plugins
             {
                 var entityLocations = GetLocationKeys(m);
                 var initiatorLocations = GetLocationKeys(ss);
+
                 // check for exclusion zones (zones with no rules mapped)
-                if (CheckExclusion(entityLocations, initiatorLocations, false)) return null;
+                if (CheckExclusion(entityLocations, initiatorLocations, false))
+                {
+                    return null;
+                }
+
                 // check for exclusions in entity groups
-                if (CheckExclusion(player, ss)) return null;
+                if (CheckExclusion(player, ss))
+                {
+                    return null;
+                }
+
                 ss.CancelInvoke(ss.WeaponTick);
                 return false;
             }
@@ -1289,6 +1342,12 @@ namespace Oxide.Plugins
                     return null;
                 }
 
+                // check for exclusions in entity group
+                if (CheckExclusion(target, turret as BaseEntity))
+                {
+                    return null;
+                }
+
                 return false;
             }
 
@@ -1322,6 +1381,11 @@ namespace Oxide.Plugins
 
             // check for exclusion zones (zones with no rules mapped)
             if (CheckExclusion(entityLocations, initiatorLocations, false))
+            {
+                return null;
+            }
+
+            if (CheckExclusion(player, trap))
             {
                 return null;
             }
@@ -1434,7 +1498,7 @@ namespace Oxide.Plugins
                     }
                 }
             }
-            if (trace) Trace("No shared locations, or no matching exclusion mapping - no exclusions)", 3);
+            if (trace) Trace("No shared locations, or no matching exclusion mapping - no exclusions", 3);
             return false;
         }
 
@@ -1460,9 +1524,8 @@ namespace Oxide.Plugins
         {
             if (!serverInitialized || string.IsNullOrEmpty(key))
                 return false;
-            if (data.HasMapping(key))
+            if (data.mappings.Remove(key))
             {
-                data.mappings.Remove(key);
                 SaveData();
                 return true;
             }
@@ -1480,8 +1543,8 @@ namespace Oxide.Plugins
         // build message string
         private string BuildMessage(BasePlayer player, string key, object[] options = null)
         {
-            string message = player == null ? GetMessage(key) : GetMessage(key, player.UserIDString);
-            if (options != null && options.Length > 0)
+            string message = GetMessage(key, player?.UserIDString);
+            if (options?.Length > 0)
                 message = string.Format(message, options);
             string type = key.Split('_')[0];
             if (player != null)
@@ -1523,7 +1586,7 @@ namespace Oxide.Plugins
         // wrap a string in a <color> tag with the passed color
         private string WrapColor(string color, string input)
         {
-            if (input == null || input.Equals("") || color == null || color.Equals(""))
+            if (string.IsNullOrEmpty(input) || string.IsNullOrEmpty(color))
                 return input;
             return "<color=" + color + ">" + input + "</color>";
         }
@@ -2090,7 +2153,7 @@ namespace Oxide.Plugins
             public string message;
             public string scheduleText;
             public bool valid;
-            public TimeSpan time;
+            public TimeSpan time { get; set; }
             [JsonIgnore]
             public bool isDaily = false;
 
