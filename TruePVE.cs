@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.1.0")]
+    [Info("TruePVE", "nivex", "2.1.1")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -626,7 +626,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new EntityGroup("heli")
             {
-                members = "BaseHelicopter"
+                members = "PatrolHelicopter"
             });
 
             config.groups.Add(new EntityGroup("highwalls")
@@ -1004,10 +1004,10 @@ namespace Oxide.Plugins
 
             if (trace) Trace($"Using RuleSet \"{ruleSet.name}\"", 1);
 
-            if (entity is BaseHelicopter)
+            if (entity is PatrolHelicopter)
             {
                 bool isBlocked = !EvaluateRules(entity, weapon, ruleSet, false);
-                if (trace) Trace($"Target is BaseHelicopter; {(isBlocked ? "block and return" : "allow and return")}", 1);
+                if (trace) Trace($"Target is PatrolHelicopter; {(isBlocked ? "block and return" : "allow and return")}", 1);
                 return !isBlocked;
             }
 
@@ -1446,7 +1446,7 @@ namespace Oxide.Plugins
         private object CheckHeliInitiator(RuleSet ruleSet, HitInfo hitInfo)
         {
             // Check for heli initiator
-            if (hitInfo.Initiator is BaseHelicopter || (hitInfo.Initiator != null && (hitInfo.Initiator.ShortPrefabName.Equals("oilfireballsmall") || hitInfo.Initiator.ShortPrefabName.Equals("napalm"))))
+            if (hitInfo.Initiator is PatrolHelicopter || (hitInfo.Initiator != null && (hitInfo.Initiator.ShortPrefabName.Equals("oilfireballsmall") || hitInfo.Initiator.ShortPrefabName.Equals("napalm"))))
             {
                 return !ruleSet.HasFlag(RuleFlags.NoHeliDamage);
             }
