@@ -10,6 +10,13 @@ using System.Text.RegularExpressions;
 using UnityEngine;
 
 /*
+    1.1.2:    
+    Added hook CanEntityTrapTrigger(BaseTrap trap, BasePlayer player)
+    Added hook CanEntityBeTargeted(BasePlayer player, BaseEntity target)
+    Evaluate rules when minicoper attacks building
+    Added flag TurretsIgnoreScientist @Credits to RFC1920
+    Added flag TrapsIgnoreScientist
+
     1.1.1:
     Fixed CanBeTargeted performance issue
     Fixed HasEmptyMapping.InvalidOperationException
@@ -27,7 +34,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "RFC1920", "1.1.1")]
+    [Info("TruePVE", "RFC1920", "1.1.2")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     class TruePVE : RustPlugin
@@ -84,7 +91,9 @@ namespace Oxide.Plugins
             TwigDamage = 1 << 14,
             NoTurretDamagePlayer = 1 << 15,
             NoHeliDamageQuarry = 1 << 16,
-            NoTurretDamageScientist = 1 << 17
+            NoTurretDamageScientist = 1 << 17,
+            TurretsIgnoreScientist = 1 << 18,
+            TrapsIgnoreScientist = 1 << 19
         }
 
         // timer to check for schedule updates
@@ -660,7 +669,7 @@ namespace Oxide.Plugins
         #endregion
 
         #region Hooks/Handler Procedures
-        void OnPlayerInit(BasePlayer player)
+        void OnPlayerConnected(BasePlayer player)
         {
             if (data.schedule.enabled && data.schedule.broadcast && currentBroadcastMessage != null)
                 SendReply(player, GetMessage("Prefix") + currentBroadcastMessage);
@@ -828,7 +837,11 @@ namespace Oxide.Plugins
                 if (trace) Trace("Initiator empty; allow and return", 1);
                 return true;
             }
-
+            if (hitinfo.Initiator is MiniCopter && entity is BuildingBlock)
+            {
+                if (trace) Trace("Initiator is turret, target is building; evaluate and return", 1);
+                return EvaluateRules(entity, hitinfo, ruleSet);
+            }
             // check for sleeper protection - return false if sleeper protection is on (true)
             if (ruleSet.HasFlag(RuleFlags.ProtectedSleepers) && hitinfo.Initiator is BaseNpc && entity is BasePlayer && (entity as BasePlayer).IsSleeping())
             {
@@ -846,6 +859,11 @@ namespace Oxide.Plugins
             // ignore checks if authorized damage enabled (except for players)
             if (ruleSet.HasFlag(RuleFlags.AuthorizedDamage) && !(entity is BasePlayer) && hitinfo.Initiator is BasePlayer && CheckAuthorized(entity, hitinfo.Initiator as BasePlayer, ruleSet))
             {
+                if (entity is SamSite)
+                {
+                    if (trace) Trace("Target is SamSite; evaluate and return", 1);
+                    return EvaluateRules(entity, hitinfo, ruleSet);
+                }
                 if (trace) Trace("Initiator is player with authorization over non-player target; allow and return", 1);
                 return true;
             }
@@ -865,8 +883,6 @@ namespace Oxide.Plugins
                     if (trace) Trace("Initiator or target is HumanNPC, with HumanNPCDamage flag set; allow and return", 1);
                     return true;
                 }
-
-            //if (ruleSet.HasFlag(RuleFlags.)
 
             if (trace) Trace("No match in pre-checks; evaluating RuleSet rules...", 1);
             return EvaluateRules(entity, hitinfo, ruleSet);
@@ -1001,10 +1017,17 @@ namespace Oxide.Plugins
         object CanBeTargeted(BasePlayer target, MonoBehaviour turret)
         {
             //Puts($"CanBeTargeted called for {target.name}", 2);
-            if (!serverInitialized || target == null || target.IsNpc || turret == null) return null;
+            if (!serverInitialized || target == null || turret == null) return null;
             if (turret as HelicopterTurret)
                 return null;
+            object extCanEntityBeTargeted = Interface.CallHook("CanEntityBeTargeted", new object[] { target, turret as BaseEntity });
+            if (extCanEntityBeTargeted != null && extCanEntityBeTargeted is bool)
+            {
+                return (bool)extCanEntityBeTargeted;
+            }
             RuleSet ruleSet = GetRuleSet(target, turret as BaseCombatEntity);
+            if (target.IsNpc && ruleSet.HasFlag(RuleFlags.TurretsIgnoreScientist))
+                return false;
             if (ruleSet.HasFlag(RuleFlags.TurretsIgnorePlayers))
                 return false;
             return null;
@@ -1012,10 +1035,17 @@ namespace Oxide.Plugins
 
         // ignore players stepping on traps if configured
         object OnTrapTrigger(BaseTrap trap, GameObject go)
-        {
+        { 
             BasePlayer player = go.GetComponent<BasePlayer>();
             if (player == null || trap == null) return null;
+            object extCanEntityTrapTrigger = Interface.CallHook("CanEntityTrapTrigger", new object[] { trap, player });
+            if (extCanEntityTrapTrigger != null && extCanEntityTrapTrigger is bool)
+            {
+                return (bool)extCanEntityTrapTrigger;
+            }
             RuleSet ruleSet = GetRuleSet(trap, player);
+            if (player.IsNpc && ruleSet.HasFlag(RuleFlags.TrapsIgnoreScientist))
+                return false;
             if (ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers))
                 return false;
             return null;
@@ -1500,7 +1530,7 @@ namespace Oxide.Plugins
             {
                 foreach (Rule rule in parsedRules)
                     if (!rule.valid)
-                        Interface.Oxide.LogWarning("Warning - invalid rule: " + rule.ruleText);
+                        Interface.Oxide.LogWarning($"Warning - invalid rule: {rule.ruleText}");
             }
 
             // add a rule
