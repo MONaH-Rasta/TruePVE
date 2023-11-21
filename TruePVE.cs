@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.1.4")]
+    [Info("TruePVE", "nivex", "2.1.5")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -851,6 +851,21 @@ namespace Oxide.Plugins
                 return null;
             }
 
+            if (config.scrap)
+            {
+                if (hitInfo.Initiator is ScrapTransportHelicopter && entity is BasePlayer player)
+                {
+                    hitInfo.damageTypes.Clear();
+                    return null;
+                }
+
+                if (hitInfo.Initiator is BasePlayer && hitInfo.WeaponPrefab is ScrapTransportHelicopter)
+                {
+                    hitInfo.damageTypes.Clear();
+                    return null;
+                }
+            }
+
             if (!AllowDamage(entity, hitInfo))
             {
                 if (trace) LogTrace();
@@ -901,7 +916,7 @@ namespace Oxide.Plugins
             return !tugboat.children.IsNullOrEmpty() && tugboat.children.Exists(child => child is VehiclePrivilege vehiclePrivilege && vehiclePrivilege.AnyAuthed() && vehiclePrivilege.IsAuthed(attacker));
         }
 
-        public bool IsAuthed(PlayerHelicopter heli, BasePlayer attacker)
+        public bool IsAuthed(BaseHelicopter heli, BasePlayer attacker)
         {
             return attacker.GetBuildingPrivilege(heli.WorldSpaceBounds()) is BuildingPrivlidge priv && priv.AnyAuthed() && priv.IsAuthed(attacker);
         }
@@ -1088,14 +1103,13 @@ namespace Oxide.Plugins
             {
                 var victim = entity as BasePlayer;
 
-                if (ruleSet.HasFlag(RuleFlags.SafeZoneTurretsIgnorePlayers) && hitInfo.Initiator is NPCAutoTurret && hitInfo.Initiator.OwnerID == 0 && victim.userID.IsSteamId())
+                if (hitInfo.Initiator is AutoTurret && hitInfo.Initiator.OwnerID == 0 && victim.userID.IsSteamId())
                 {
-                    return true;
-                }
-
-                if (!ruleSet.HasFlag(RuleFlags.StaticTurretsIgnorePlayers) && hitInfo.Initiator is AutoTurret && hitInfo.Initiator.OwnerID == 0 && victim.userID.IsSteamId())
-                {
-                    return true;
+                    if (hitInfo.Initiator is NPCAutoTurret)
+                    {
+                        return !ruleSet.HasFlag(RuleFlags.SafeZoneTurretsIgnorePlayers);
+                    }
+                    return !ruleSet.HasFlag(RuleFlags.StaticTurretsIgnorePlayers);
                 }
 
                 if (entity == attacker && damageType == DamageType.Bullet && hitInfo.damageTypes.Total() < 0f)
@@ -1229,7 +1243,7 @@ namespace Oxide.Plugins
                             if (trace) Trace("Initiator is player with building priv over target; allow and return", 1);
                             return true;
                         }
-                        if (entity is PlayerHelicopter playerHelicopter && IsAuthed(playerHelicopter, attacker))
+                        if (entity is BaseHelicopter playerHelicopter && !(entity is PatrolHelicopter) && IsAuthed(playerHelicopter, attacker))
                         {
                             if (trace) Trace("Initiator is player with heli priv over target; allow and return", 1);
                             return true;
@@ -2087,6 +2101,8 @@ namespace Oxide.Plugins
             public bool Ladders;
             [JsonProperty(PropertyName = "Ignore Sleeping Bag Damage")]
             public bool SleepingBags;
+            [JsonProperty(PropertyName = "Block Scrap Heli Damage")]
+            public bool scrap = true;
             Dictionary<NetworkableId, List<string>> groupCache = new();
 
             public void Init()
