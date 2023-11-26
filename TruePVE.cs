@@ -13,9 +13,14 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
+/*
+Fixed `LockedBoxesImmortal` and `LockedDoorsImmortal` breaking despawn with Raidable Bases plugin
+Added `Block Igniter Damage` (false)
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.1.5")]
+    [Info("TruePVE", "nivex", "2.1.6")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -866,6 +871,12 @@ namespace Oxide.Plugins
                 }
             }
 
+            if (config.igniter && entity is Igniter && entity.OwnerID != 0)
+            {
+                hitInfo.damageTypes.Clear();
+                return null;
+            }
+
             if (!AllowDamage(entity, hitInfo))
             {
                 if (trace) LogTrace();
@@ -1020,14 +1031,6 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            // Check storage containers and doors for locks
-            if (ruleSet.HasFlag(RuleFlags.LockedBoxesImmortal) && entity is StorageContainer && !(entity is LootContainer) || ruleSet.HasFlag(RuleFlags.LockedDoorsImmortal) && entity is Door)
-            {
-                object hurt = CheckLock(ruleSet, entity, hitInfo); // check for lock
-                if (trace) Trace($"Door/StorageContainer detected with immortal flag; lock check results: {(hurt == null ? "null (no lock or unlocked); continue checks" : (bool)hurt ? "allow and return" : "block and return")}", 1);
-                if (hurt is bool) return (bool)hurt;
-            }
-
             // check heli and turret
             var heli = CheckHeliInitiator(ruleSet, hitInfo);
 
@@ -1038,6 +1041,10 @@ namespace Oxide.Plugins
 
             if (heli is bool val1)
             {
+                if (CheckImmortalFlag(entity, hitInfo, ruleSet) is bool val2)
+                {
+                    return val2;
+                }
                 return HandleHelicopter(ruleSet, entity, weapon, val1);
             }
 
@@ -1063,6 +1070,11 @@ namespace Oxide.Plugins
                 }
                 if (trace) Trace($"Initiator empty; allow and return", 1);
                 return true;
+            }
+
+            if (CheckImmortalFlag(entity, hitInfo, ruleSet) is bool val3)
+            {
+                return val3;
             }
 
             if (hitInfo.Initiator is SamSite ss && (entity is BasePlayer || entity is BaseMountable))
@@ -1289,6 +1301,18 @@ namespace Oxide.Plugins
 
             if (trace) Trace("No match in pre-checks; evaluating RuleSet rules...", 1);
             return EvaluateRules(entity, hitInfo, ruleSet);
+        }
+
+        private object CheckImmortalFlag(BaseCombatEntity entity, HitInfo hitInfo, RuleSet ruleSet)
+        {
+            // Check storage containers and doors for locks for player entity only
+            if (ruleSet.HasFlag(RuleFlags.LockedBoxesImmortal) && entity is StorageContainer && !(entity is LootContainer) || ruleSet.HasFlag(RuleFlags.LockedDoorsImmortal) && entity is Door)
+            {
+                object hurt = CheckLock(ruleSet, entity, hitInfo); // check for lock
+                if (trace) Trace($"Player Door/StorageContainer detected with immortal flag; lock check results: {(hurt == null ? "null (no lock or unlocked); continue checks" : (bool)hurt ? "allow and return" : "block and return")}", 1);
+                if (hurt is bool val) return val;
+            }
+            return null;
         }
 
         private void TrySetInitiator(HitInfo hitInfo, BaseEntity weapon)
@@ -2103,6 +2127,8 @@ namespace Oxide.Plugins
             public bool SleepingBags;
             [JsonProperty(PropertyName = "Block Scrap Heli Damage")]
             public bool scrap = true;
+            [JsonProperty(PropertyName = "Block Igniter Damage")]
+            public bool igniter;
             Dictionary<NetworkableId, List<string>> groupCache = new();
 
             public void Init()
