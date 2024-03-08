@@ -13,18 +13,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-/*
-Fixed Block Scrap Heli Damage (thanks @AVOCoder)
-Added `ExcludeTugboatFromImmortalFlags` flag
-Added `Allow PVP Above Height` (5000) (set to 1000 or such to allow PVP in sky bases or such. use `printpos` in game console to find the appropriate Y value from the X Y Z coordinates)
-Added `Allow PVP Below Height` (-500) (set to -100 or such to allow PVP in underground monuments. use `printpos` in game console to find the appropriate Y value from the X Y Z coordinates)
-Added Pinata to dispensers default
-Added Legacy Shelter support to CupboardOwnership, AuthorizedDamageRequiresOwnership, and AuthorizedDamageCheckPrivilege flags
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.1.7")]
+    [Info("TruePVE", "nivex", "2.1.8")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -1098,13 +1089,13 @@ namespace Oxide.Plugins
 
             if (isVictim)
             {
-                if (isAttacker && attacker.transform.position.y <= config.options.Underworld)
+                if (isAttacker && config.options.Underworld > -500f && !attacker.IsKilled() && attacker.transform.position.y <= config.options.Underworld)
                 {
                     if (trace) Trace($"Initiator is player under world; Target is player (PVP); allow and return", 1);
                     return true;
                 }
 
-                if (isAttacker && attacker.transform.position.y >= config.options.Aboveworld)
+                if (isAttacker && config.options.Aboveworld < 5000f && !attacker.IsKilled() && attacker.transform.position.y >= config.options.Aboveworld)
                 {
                     if (trace) Trace($"Initiator is player above world; Target is player (PVP); allow and return", 1);
                     return true;
@@ -2770,6 +2761,7 @@ namespace Oxide.Plugins.TruePVEExtensionMethods
         public static List<T> OfType<T>(this IEnumerable<BaseNetworkable> a) where T : BaseEntity { var b = new List<T>(); using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (c.Current is T) { b.Add(c.Current as T); } } } return b; }
         public static R Max<T, R>(this IList<T> a, Func<T, R> b) { R c = default(R); Comparer<R> @default = Comparer<R>.Default; for (int i = 0; i < a.Count; i++) { var d = b(a[i]); if (@default.Compare(d, c) > 0) { c = d; } } return c; }
         public static int Sum<T>(this IList<T> a, Func<T, int> b) { int c = 0; for (int i = 0; i < a.Count; i++) { var d = b(a[i]); if (!float.IsNaN(d)) { c += d; } } return c; }
+        public static bool IsKilled(this BaseNetworkable a) { try { return (object)a == null || a.IsDestroyed || a.transform == null;  } catch { return true; } }
         public static bool IsOnline(this BasePlayer a) { return (object)a != null && (object)a.net != null && (object)a.net.connection != null; }
         public static bool IsNull<T>(this T a) where T : class { return (object)a == null; }
         public static bool CanCall(this Plugin a) { return a != null && a.IsLoaded; }
