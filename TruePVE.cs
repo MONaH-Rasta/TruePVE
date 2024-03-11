@@ -13,9 +13,11 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
+// Added `Players Can Trigger Traps With No Owner` (true)
+
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.1.8")]
+    [Info("TruePVE", "nivex", "2.1.9")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -1741,7 +1743,7 @@ namespace Oxide.Plugins
             {
                 return true;
             }
-            else if (!player.IsNpc && player.userID.IsSteamId() && ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers))
+            else if (player.userID.IsSteamId() && ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers))
             {
                 // check for exclusion zones (zones with no rules mapped)
                 if (CheckExclusion(entityLocations, initiatorLocations, false))
@@ -1750,6 +1752,11 @@ namespace Oxide.Plugins
                 }
 
                 if (CheckExclusion(trap))
+                {
+                    return null;
+                }
+
+                if (config.traps && trap.OwnerID == 0uL)
                 {
                     return null;
                 }
@@ -2130,6 +2137,8 @@ namespace Oxide.Plugins
             public bool Ladders;
             [JsonProperty(PropertyName = "Ignore Sleeping Bag Damage")]
             public bool SleepingBags;
+            [JsonProperty(PropertyName = "Players Can Trigger Traps With No Owner")]
+            public bool traps = true;
             [JsonProperty(PropertyName = "Block Scrap Heli Damage")]
             public bool scrap = true;
             [JsonProperty(PropertyName = "Block Igniter Damage")]
