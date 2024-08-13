@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.2.0")]
+    [Info("TruePVE", "nivex", "2.2.1")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -722,16 +722,12 @@ namespace Oxide.Plugins
             {
                 return;
             }
+            
+            bool playerInRange = tracePlayer != null && !tracePlayer.IsDestroyed && tracePlayer.Distance(traceEntity) <= traceDistance;
 
-            bool shouldTraceToPlayer = config.options.PlayerConsole && tracePlayer.IsOnline();
-            bool isWithinTraceDistance = shouldTraceToPlayer && tracePlayer.Distance(traceEntity) <= traceDistance;
-
-            if (isWithinTraceDistance || traceDistance == 0)
+            if ((config.options.PlayerConsole && playerInRange) || (config.options.ServerConsole && (traceDistance == 0 || playerInRange)))
             {
-                if (config.options.ServerConsole || shouldTraceToPlayer)
-                {
-                    _tsb.AppendLine(string.Empty.PadLeft(indentation, ' ') + message);
-                }
+                _tsb.AppendLine(string.Empty.PadLeft(indentation, ' ') + message);
             }
         }
 
@@ -752,7 +748,10 @@ namespace Oxide.Plugins
                     {
                         tracePlayer.ConsoleMessage(text);
                     }
-                    LogToFile(traceFile, text, this);
+                    if (config.options.LogToFile)
+                    {
+                        LogToFile(traceFile, text, this);
+                    }
                 }
             }
             catch (IOException)
@@ -1429,13 +1428,13 @@ namespace Oxide.Plugins
                     {
                         hitInfo.Initiator = weapon.creatorEntity;
                     }
-                    else if (weapon.HasParent())
+                    else if (weapon.GetParentEntity() is BasePlayer attacker1)
                     {
-                        hitInfo.Initiator = weapon.GetParentEntity();
+                        hitInfo.Initiator = attacker1;
                     }
-                    else
+                    else if (weapon is BasePlayer attacker2)
                     {
-                        hitInfo.Initiator = weapon;
+                        hitInfo.Initiator = attacker2;
                     }
                 }
             }
@@ -2228,6 +2227,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Trace To Server Console")]
             public bool ServerConsole { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Log Trace To File")]
+            public bool LogToFile { get; set; } = true;
 
             [JsonProperty(PropertyName = "Maximum Distance From Player To Trace")]
             public float MaxTraceDistance { get; set; } = 50f;
