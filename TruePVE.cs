@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.2.1")]
+    [Info("TruePVE", "nivex", "2.2.2")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -861,16 +861,8 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (config.traps && entity.OwnerID == 0uL && (entity is BaseTrap || entity is HBHFSensor || entity is GunTrap))
-            {
-                return null;
-            }
-
-            if (config.turrets && entity.OwnerID == 0uL && (entity is FlameTurret || entity is AutoTurret))
-            {
-                return null;
-            }
-
+            var weapon = hitInfo.Initiator ?? hitInfo.WeaponPrefab ?? hitInfo.Weapon;
+            
             if ((damageType == DamageType.Cold || damageType == DamageType.Heat) && IsMetabolismDamage(victim, damageType, damageAmount))
             {
                 if (trace) Trace($"Initiator is {damageType} metabolism damage; {((damageType == DamageType.Cold ? config.options.Cold : config.options.Heat) ? "allow and return" : "block and return")}", 1);
@@ -879,7 +871,7 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (!AllowDamage(victim, entity, hitInfo, damageType, damageAmount))
+            if (!AllowDamage(weapon, victim, entity, hitInfo, damageType, damageAmount))
             {
                 if (trace) LogTrace();
                 CancelHit(hitInfo);
@@ -888,6 +880,30 @@ namespace Oxide.Plugins
 
             if (trace) LogTrace();
             return null;
+        }
+
+        private bool IsTrap(BaseEntity entity) => entity is BaseTrap || entity is HBHFSensor || entity is GunTrap;
+        
+        private bool IsTurret(BaseEntity entity) => entity is FlameTurret || entity is AutoTurret;
+
+        private bool ContainsTopology(TerrainTopology.Enum mask, Vector3 position, float radius) => (TerrainMeta.TopologyMap.GetTopology(position, radius) & (int)mask) != 0;
+
+        private bool CanPlayerTriggerTurretOrTrap(BasePlayer victim, BaseEntity entity, BaseEntity weapon)
+        {
+            if (weapon != null && weapon.OwnerID == 0uL && victim != null && victim.userID.IsSteamId() && (config.PlayersTriggerTraps && IsTrap(weapon) || config.PlayersTriggerTurrets && IsTurret(weapon)))
+            {
+                return ContainsTopology(TerrainTopology.Enum.Monument, weapon.transform.position, 5f);
+            }
+            return false;
+        }
+
+        private bool CanPlayerHurtTurretOrTrap(BasePlayer victim, BaseEntity entity, BaseEntity weapon)
+        {
+            if (entity.OwnerID == 0uL && weapon is BasePlayer attacker && attacker.userID.IsSteamId() && (config.PlayersHurtTraps && IsTrap(entity) || config.PlayersHurtTurrets && IsTurret(entity)))
+            {
+                return ContainsTopology(TerrainTopology.Enum.Monument, weapon.transform.position, 5f);
+            }
+            return false;
         }
 
         private void CancelHit(HitInfo hitInfo)
@@ -956,7 +972,7 @@ namespace Oxide.Plugins
         }
 
         // determines if an entity is "allowed" to take damage
-        private bool AllowDamage(BasePlayer victim, BaseCombatEntity entity, HitInfo hitInfo, DamageType damageType, float damageAmount)
+        private bool AllowDamage(BaseEntity weapon, BasePlayer victim, BaseCombatEntity entity, HitInfo hitInfo, DamageType damageType, float damageAmount)
         {
             if (trace)
             {
@@ -990,8 +1006,6 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            var weapon = hitInfo.Initiator ?? hitInfo.WeaponPrefab ?? hitInfo.Weapon;
-
             TrySetInitiator(hitInfo);
 
             if (trace)
@@ -1012,6 +1026,18 @@ namespace Oxide.Plugins
             if (CheckExclusion(entityLocations, initiatorLocations, trace))
             {
                 if (trace) Trace("Exclusion found; allow and return", 1);
+                return true;
+            }
+
+            if ((config.PlayersHurtTraps || config.PlayersHurtTurrets) && CanPlayerHurtTurretOrTrap(victim, entity, weapon))
+            {
+                if (trace) Trace($"Initiator is player; Target is turret or trap in monument topology; allow and return", 1);
+                return true;
+            }
+
+            if ((config.PlayersTriggerTraps || config.PlayersTriggerTurrets) && CanPlayerTriggerTurretOrTrap(victim, entity, weapon))
+            {
+                if (trace) Trace($"Initiator is turret or trap in monument topology; Target is player; allow and return", 1);
                 return true;
             }
 
@@ -1767,6 +1793,11 @@ namespace Oxide.Plugins
                 return val ? (object)null : true;
             }
 
+            if (config.PlayersTriggerTurrets && entity.OwnerID == 0uL && IsTurret(entity) && !entity.HasParent())
+            {
+                return null;
+            }
+
             RuleSet ruleSet = GetRuleSet(target, entity);
 
             if (ruleSet == null)
@@ -1795,11 +1826,6 @@ namespace Oxide.Plugins
             }
             else if (isAutoTurret && ruleSet.HasFlag(isStatic ? RuleFlags.StaticTurretsIgnorePlayers : RuleFlags.TurretsIgnorePlayers) || !isAutoTurret && ruleSet.HasFlag(RuleFlags.TrapsIgnorePlayers))
             {
-                if (config.turrets && entity.OwnerID == 0uL)
-                {
-                    return null;
-                }
-
                 if (isAutoTurret && IsFunTurret(entity as AutoTurret))
                 {
                     return null;
@@ -1872,7 +1898,7 @@ namespace Oxide.Plugins
                     return null;
                 }
 
-                if (config.traps && trap.OwnerID == 0uL)
+                if (config.PlayersTriggerTraps && trap.OwnerID == 0uL && !trap.HasParent())
                 {
                     return null;
                 }
@@ -2289,10 +2315,14 @@ namespace Oxide.Plugins
             public bool Ladders;
             [JsonProperty(PropertyName = "Ignore Sleeping Bag Damage")]
             public bool SleepingBags;
-            [JsonProperty(PropertyName = "Players Can Trigger Traps With No Owner")]
-            public bool traps = true;
-            [JsonProperty(PropertyName = "Players Can Trigger Turrets With No Owner")]
-            public bool turrets = true;
+            [JsonProperty(PropertyName = "Players Can Trigger Traps In Monument Topology")]
+            public bool PlayersTriggerTraps = true;
+            [JsonProperty(PropertyName = "Players Can Hurt Traps In Monument Topology")]
+            public bool PlayersHurtTraps;
+            [JsonProperty(PropertyName = "Players Can Trigger Turrets In Monument Topology")]
+            public bool PlayersTriggerTurrets = true;
+            [JsonProperty(PropertyName = "Players Can Hurt Turrets In Monument Topology")]
+            public bool PlayersHurtTurrets;
             [JsonProperty(PropertyName = "Block Scrap Heli Damage")]
             public bool scrap = true;
             [JsonProperty(PropertyName = "Block Igniter Damage")]
@@ -2452,7 +2482,7 @@ namespace Oxide.Plugins
                         return !resValue;
                     }*/
 
-                    return resValue;
+return resValue;
                 }
 
                 if (returnDefaultValue)
