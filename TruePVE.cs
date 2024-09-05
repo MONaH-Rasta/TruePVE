@@ -1,4 +1,5 @@
 ﻿using Facepunch;
+using Facepunch.Math;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
@@ -15,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.2.2")]
+    [Info("TruePVE", "nivex", "2.2.3")]
     [Description("Improvement of the default Rust PVE behavior")]
     internal
     // Thanks to the original author, ignignokt84.
@@ -118,6 +119,7 @@ namespace Oxide.Plugins
         {
             Instance = null;
             scheduleUpdateTimer?.Destroy();
+            SaveData();
         }
 
         private void OnPluginLoaded(Plugin plugin)
@@ -171,6 +173,7 @@ namespace Oxide.Plugins
                           WrapColor("cyan", $"tpve.{Command.sched} [enable|disable]") + $" - {GetMessage("Cmd_Usage_sched")}{Environment.NewLine}" +
                           WrapColor("cyan", $"/tpve_prod") + $" - {GetMessage("Cmd_Usage_prod")}{Environment.NewLine}" +
                           WrapColor("cyan", $"/tpve map") + $" - {GetMessage("Cmd_Usage_map")}";
+            LoadData();
         }
 
         private void OnServerInitialized(bool isStartup)
@@ -220,6 +223,94 @@ namespace Oxide.Plugins
             Subscribe(nameof(OnMlrsFire));
         }
         #endregion
+
+        #region Data
+
+        private class StoredData
+        {
+            public Dictionary<ulong, int> LastSeen = new();
+            public string LastRunTime { get; set; } = DateTime.MinValue.ToString();
+        }
+
+        private StoredData data = new();
+
+        private void LoadData()
+        {
+            try { data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name); } catch (Exception ex) { Puts(ex.ToString()); }
+            data ??= new();
+            data.LastSeen ??= new();
+            if (data.LastRunTime != DateTime.MinValue.ToString() && DateTime.TryParse(data.LastRunTime, out var lastDate) && DateTime.Now.Subtract(lastDate).TotalHours >= 24)
+            {
+                data = new();
+                data.LastRunTime = DateTime.Now.ToString();
+                Puts("Last seen data wiped due to plugin not being loaded for {0} day(s).", DateTime.Now.Subtract(lastDate).Days);
+            }
+            if (config.AllowKillingSleepersHoursOffline <= 0f)
+            {
+                if (data.LastSeen.Count > 0)
+                {
+                    data.LastSeen.Clear();
+                    SaveData();
+                }
+                return;
+            }
+            timer.Every(60f, UpdateLastSeen);
+            UpdateLastSeen();
+        }
+
+        private void SaveData()
+        {
+            data.LastRunTime = DateTime.Now.ToString();
+            Interface.Oxide.DataFileSystem.WriteObject(Name, data);
+        }
+
+        public void UpdateLastSeen()
+        {
+            bool changed = false;
+            foreach (var sleeper in BasePlayer.sleepingPlayerList)
+            {
+                if (!sleeper || !sleeper.userID.IsSteamId())
+                {
+                    continue;
+                }
+                if (!data.LastSeen.ContainsKey(sleeper.userID))
+                {
+                    data.LastSeen[sleeper.userID] = Epoch.Current;
+                    changed = true;
+                }
+            }
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (data.LastSeen.Remove(player.userID))
+                {
+                    changed = true;
+                }
+            }
+            if (changed)
+            {
+                SaveData();
+            }
+        }
+
+        public bool CanKillOfflinePlayer(BasePlayer player)
+        {
+            if (config.AllowKillingSleepersHoursOffline <= 0f)
+            {
+                return false;
+            }
+            if (player.IsConnected || !player.IsSleeping())
+            {
+                data.LastSeen.Remove(player.userID);
+                return false;
+            }
+            if (!data.LastSeen.TryGetValue(player.userID, out var lastSeen))
+            {
+                return false;
+            }
+            return Epoch.Current - lastSeen > config.AllowKillingSleepersHoursOffline * 3600f;
+        }
+
+        #endregion Data
 
         #region Command Handling
         // delegation method for commands
@@ -772,7 +863,91 @@ namespace Oxide.Plugins
         }
 
         private string CurrentRuleSetName() => currentRuleSet?.name;
+
         private bool IsEnabled() => tpveEnabled;
+
+        private class PlayerExclusion : Pool.IPooled
+        {
+            public Plugin plugin;
+            public float time;
+            public bool IsExpired => Time.time > time;
+            public void EnterPool()
+            {
+                plugin = null;
+                time = 0f;
+            }
+            public void LeavePool()
+            {
+                plugin = null; 
+                time = 0f;
+            }
+        }
+
+        private Dictionary<ulong, List<PlayerExclusion>> playerDelayExclusions = new();
+
+        private void ExcludePlayer(ulong userid, float maxDelayLength, Plugin plugin)
+        {
+            if (plugin == null)
+            {
+                return;
+            }
+            if (!playerDelayExclusions.TryGetValue(userid, out var exclusions))
+            {
+                playerDelayExclusions[userid] = exclusions = Pool.Get<List<PlayerExclusion>>();
+            }
+            var exclusion = exclusions.Find(x => x.plugin == plugin);
+            if (maxDelayLength <= 0f)
+            {
+                if (exclusion != null)
+                {
+                    exclusions.Remove(exclusion);
+                    exclusion.plugin = null;
+                    exclusion.time = 0f;
+                    Pool.Free(ref exclusion);
+                }
+                if (exclusions.Count == 0)
+                {
+                    playerDelayExclusions.Remove(userid);
+                    Pool.FreeUnmanaged(ref exclusions);
+                }
+            }
+            else
+            {
+                if (exclusion == null)
+                {
+                    exclusion = Pool.Get<PlayerExclusion>();
+                    exclusion.plugin = plugin;
+                    exclusions.Add(exclusion);
+                }
+                exclusion.time = Time.time + maxDelayLength;
+            }
+        }
+
+        private bool HasDelayExclusion(ulong userid)
+        {
+            if (playerDelayExclusions.TryGetValue(userid, out var exclusions))
+            {
+                for (int i = 0; i < exclusions.Count; i++)
+                {
+                    var exclusion = exclusions[i];
+                    if (!exclusion.IsExpired)
+                    {
+                        return true;
+                    }
+                    exclusions.RemoveAt(i);
+                    exclusion.plugin = null;
+                    exclusion.time = 0f;
+                    Pool.Free(ref exclusion);
+                    i--;
+                }
+                if (exclusions.Count == 0)
+                {
+                    playerDelayExclusions.Remove(userid);
+                    Pool.Free(ref exclusions);
+                }
+            }
+            return false;
+        }
 
         // handle damage - if another mod must override TruePVE damages or take priority,
         // set handleDamage to false and reference HandleDamage from the other mod(s)
@@ -1049,28 +1224,46 @@ namespace Oxide.Plugins
             if (trace) Trace($"Using RuleSet \"{ruleSet.name}\"", 1);
 
             var attacker = hitInfo.Initiator as BasePlayer;
-            var isAttacker = attacker is BasePlayer;
-            var isVictim = entity is BasePlayer;
+            var isAttacker = !attacker.IsKilled();
+            var isVictim = !victim.IsKilled();
 
             if (isVictim)
             {
-                if (isAttacker && config.options.Underworld > -500f && !attacker.IsKilled() && attacker.transform.position.y <= config.options.Underworld)
+                if (isAttacker)
                 {
-                    if (trace) Trace($"Initiator is player under world; Target is player (PVP); allow and return", 1);
-                    return true;
+                    if (CanKillOfflinePlayer(victim))
+                    {
+                        if (trace) Trace($"Initiator ({attacker}) and target ({victim} exceeds Allow Killing Sleepers offline time); allow and return", 1);
+                        return true;
+                    }
+
+                    bool atkCondition = HasDelayExclusion(attacker.userID) ||
+                                        (config.options.Aboveworld < 5000f && attacker.transform.position.y >= config.options.Aboveworld) ||
+                                        (config.options.Underworld > -500f && attacker.transform.position.y <= config.options.Underworld) ||
+                                        (!initiatorLocations.IsNullOrEmpty() && initiatorLocations.Exists(loc => config.mappings.TryGetValue(loc, out var mapping) && mapping.Equals("exclude")));
+
+                    if (atkCondition)
+                    {
+                        bool vicCondition = HasDelayExclusion(victim.userID) ||
+                                            (config.options.Aboveworld < 5000f && victim.transform.position.y >= config.options.Aboveworld) ||
+                                            (config.options.Underworld > -500f && victim.transform.position.y <= config.options.Underworld) ||
+                                            (!entityLocations.IsNullOrEmpty() && entityLocations.Exists(loc => config.mappings.TryGetValue(loc, out var mapping) && mapping.Equals("exclude")));
+
+                        if (vicCondition)
+                        {
+                            if (trace) Trace($"Initiator ({attacker}) and target ({victim}) meet exclusion conditions; allow and return", 1);
+                            return true;
+                        }
+                    }
                 }
-                else if (config.options.UnderworldOther > -500f && (!isAttacker || !attacker.userID.IsSteamId()) && victim.transform.position.y <= config.options.UnderworldOther)
+
+                if (config.options.UnderworldOther > -500f && (!isAttacker || !attacker.userID.IsSteamId()) && victim.transform.position.y <= config.options.UnderworldOther)
                 {
                     if (trace) Trace($"Initiator is {weapon} under world; Target is player; allow and return", 1);
                     return true;
                 }
 
-                if (isAttacker && config.options.Aboveworld < 5000f && !attacker.IsKilled() && attacker.transform.position.y >= config.options.Aboveworld)
-                {
-                    if (trace) Trace($"Initiator is player above world; Target is player (PVP); allow and return", 1);
-                    return true;
-                }
-                else if (config.options.AboveworldOther < 5000f && (!isAttacker || !attacker.userID.IsSteamId()) && victim.transform.position.y >= config.options.AboveworldOther)
+                if (config.options.AboveworldOther < 5000f && (!isAttacker || !attacker.userID.IsSteamId()) && victim.transform.position.y >= config.options.AboveworldOther)
                 {
                     if (trace) Trace($"Initiator is {weapon} above world; Target is player; allow and return", 1);
                     return true;
@@ -1181,6 +1374,8 @@ namespace Oxide.Plugins
                 }
             }
 
+            bool selfDamageFlag = ruleSet.HasFlag(RuleFlags.SelfDamage);
+
             if (isVictim)
             {
                 if (hitInfo.Initiator is AutoTurret && hitInfo.Initiator.OwnerID == 0 && victim.userID.IsSteamId())
@@ -1210,7 +1405,7 @@ namespace Oxide.Plugins
                 }
 
                 // allow players to hurt themselves
-                if (ruleSet.HasFlag(RuleFlags.SelfDamage) && victim.userID.IsSteamId() && hitInfo.Initiator == entity)
+                if (selfDamageFlag && victim.userID.IsSteamId() && hitInfo.Initiator == entity)
                 {
                     if (trace) Trace($"SelfDamage flag; player inflicted damage to self; allow and return", 1);
                     return true;
@@ -1237,7 +1432,7 @@ namespace Oxide.Plugins
                     {
                         bool isAllowed = !ruleSet.HasFlag(RuleFlags.TwigDamageRequiresOwnership) || IsAlly(entity.OwnerID, attacker.userID) || IsAuthed(block, attacker);
                         if (trace) Trace($"Initiator is player and target is twig block, with TwigDamage flag set; {(isAllowed ? "allow" : "block")} and return", 1);
-                        TwigOutputHandler(entity, damageType, damageAmount, attacker, block);
+                        TwigOutputHandler(entity, damageType, damageAmount, attacker, block, selfDamageFlag);
                         return isAllowed;
                     }
 
@@ -1377,7 +1572,7 @@ namespace Oxide.Plugins
             return EvaluateRules(entity, hitInfo, ruleSet);
         }
 
-        private void TwigOutputHandler(BaseCombatEntity entity, DamageType damageType, float damageAmount, BasePlayer attacker, BuildingBlock block)
+        private void TwigOutputHandler(BaseCombatEntity entity, DamageType damageType, float damageAmount, BasePlayer attacker, BuildingBlock block, bool selfDamageFlag)
         {
             if ((config.options.Twig.Log || config.options.Twig.Notify || config.options.Twig.ReflectDamageMultiplier > 0f) && attacker.userID.IsSteamId() && !IsAlly(entity.OwnerID, attacker.userID))
             {
@@ -1395,6 +1590,11 @@ namespace Oxide.Plugins
                 if (config.options.Twig.ReflectDamageMultiplier > 0f)
                 {
                     float reflectedDamage = damageAmount * config.options.Twig.ReflectDamageMultiplier;
+
+                    if (!selfDamageFlag)
+                    {
+                        damageType = DamageType.Radiation;
+                    }
 
                     attacker.Hurt(new HitInfo(attacker, attacker, damageType, reflectedDamage)
                     {
@@ -1502,7 +1702,7 @@ namespace Oxide.Plugins
                 if (trace) Trace($"Initiator is heli, {entity.ShortPrefabName} is within TC; block and return", 1);
                 return false;
             }
-            if (trace) Trace($"Initiator is heli, target is non-player; {(allow ? "allow and return" : "block and return")}", 1);
+            if (trace) Trace($"Initiator is heli, target is {entity.ShortPrefabName}; {(allow ? "allow and return" : "block and return")}", 1);
             return allow;
         }
 
@@ -1525,12 +1725,12 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            if (Convert.ToBoolean(Clans?.Call("IsClanMember", playerId.ToString(), targetId.ToString())))
+            if (Clans != null && Convert.ToBoolean(Clans?.Call("IsClanMember", playerId.ToString(), targetId.ToString())))
             {
                 return true;
             }
 
-            if (Convert.ToBoolean(Friends?.Call("AreFriends", playerId.ToString(), targetId.ToString())))
+            if (Friends != null && Convert.ToBoolean(Friends?.Call("AreFriends", playerId.ToString(), targetId.ToString())))
             {
                 return true;
             }
@@ -1628,7 +1828,7 @@ namespace Oxide.Plugins
         {
             if (!cupboardOwnership)
             {
-                return entity.OwnerID == 0 && !entity.InSafeZone() || IsAlly(entity.OwnerID, player.userID); // allow damage to entities that the player owns
+                return entity.OwnerID == 0 && !entity.InSafeZone() || IsAlly(entity.OwnerID, player.userID); // allow damage to entities that the player owns or is an ally of
             }
 
             // treat entities outside of cupboard range as unowned, and entities inside cupboard range require authorization
@@ -1639,7 +1839,16 @@ namespace Oxide.Plugins
                 return entityPriv == null || entityPriv.AnyAuthed() && entityPriv.IsAuthed(player);
             }
 
-            var priv = player.GetBuildingPrivilege(entity.WorldSpaceBounds());
+            BuildingPrivlidge priv = null;
+            if (entity is DecayEntity decayEntity)
+            {
+                BuildingManager.Building building = decayEntity.GetBuilding();
+                if (building != null)
+                {
+                    priv = building.GetDominatingBuildingPrivilege();
+                }
+            }
+            priv ??= player.GetBuildingPrivilege(entity.WorldSpaceBounds());
 
             return priv == null || priv.AnyAuthed() && priv.IsAuthed(player);
         }
@@ -2307,6 +2516,8 @@ namespace Oxide.Plugins
             public bool AllowKillingSleepersAlly;
             [JsonProperty(PropertyName = "Allow Killing Sleepers (Authorization Only)")]
             public bool AllowKillingSleepersAuthorization;
+            [JsonProperty(PropertyName = "Allow Killing Sleepers (After X Hours Offline)")]
+            public float AllowKillingSleepersHoursOffline;
             [JsonProperty(PropertyName = "Ignore Firework Damage")]
             public bool Firework = true;
             [JsonProperty(PropertyName = "Ignore Campfire Damage")]
@@ -2365,7 +2576,7 @@ namespace Oxide.Plugins
 
             public bool HasEmptyMapping(string key)
             {
-                if (mappings.ContainsKey(AllZones) && mappings[AllZones].Equals("exclude")) return true; // exlude all zones
+                if (mappings.ContainsKey(AllZones) && mappings[AllZones].Equals("exclude")) return true; // exclude all zones
                 if (!mappings.ContainsKey(key)) return false;
                 if (mappings[key].Equals("exclude")) return true;
                 RuleSet r = ruleSets.FirstOrDefault(rs => rs.name.Equals(mappings[key]));
