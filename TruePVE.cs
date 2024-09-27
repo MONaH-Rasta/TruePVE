@@ -27,7 +27,8 @@ namespace Oxide.Plugins
         // config/data container
         private Configuration config = new();
 
-        [PluginReference] readonly Plugin ZoneManager, LiteZones, Clans, Friends, AbandonedBases, RaidableBases;
+        [PluginReference]
+        Plugin ZoneManager, LiteZones, Clans, Friends, AbandonedBases, RaidableBases;
 
         public string usageString;
         private enum Command { def, sched, trace, usage, enable, sleepers };
