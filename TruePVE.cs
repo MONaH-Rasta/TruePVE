@@ -6,6 +6,7 @@ using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using Oxide.Plugins.TruePVEExtensionMethods;
 using Rust;
+using Rust.Ai.Gen2;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -16,11 +17,10 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.2.3")]
+    [Info("TruePVE", "nivex", "2.2.4")]
     [Description("Improvement of the default Rust PVE behavior")]
-    internal
     // Thanks to the original author, ignignokt84.
-    class TruePVE : RustPlugin
+    internal class TruePVE : RustPlugin
     {
         #region Variables
         private static TruePVE Instance;
@@ -813,7 +813,7 @@ namespace Oxide.Plugins
             {
                 return;
             }
-            
+
             bool playerInRange = tracePlayer != null && !tracePlayer.IsDestroyed && tracePlayer.Distance(traceEntity) <= traceDistance;
 
             if ((config.options.PlayerConsole && playerInRange) || (config.options.ServerConsole && (traceDistance == 0 || playerInRange)))
@@ -878,7 +878,7 @@ namespace Oxide.Plugins
             }
             public void LeavePool()
             {
-                plugin = null; 
+                plugin = null;
                 time = 0f;
             }
         }
@@ -1037,7 +1037,7 @@ namespace Oxide.Plugins
             }
 
             var weapon = hitInfo.Initiator ?? hitInfo.WeaponPrefab ?? hitInfo.Weapon;
-            
+
             if ((damageType == DamageType.Cold || damageType == DamageType.Heat) && IsMetabolismDamage(victim, damageType, damageAmount))
             {
                 if (trace) Trace($"Initiator is {damageType} metabolism damage; {((damageType == DamageType.Cold ? config.options.Cold : config.options.Heat) ? "allow and return" : "block and return")}", 1);
@@ -1058,7 +1058,7 @@ namespace Oxide.Plugins
         }
 
         private bool IsTrap(BaseEntity entity) => entity is BaseTrap || entity is HBHFSensor || entity is GunTrap;
-        
+
         private bool IsTurret(BaseEntity entity) => entity is FlameTurret || entity is AutoTurret;
 
         private bool ContainsTopology(TerrainTopology.Enum mask, Vector3 position, float radius) => (TerrainMeta.TopologyMap.GetTopology(position, radius) & (int)mask) != 0;
@@ -1161,7 +1161,7 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            if (entity is BaseNpc)
+            if (entity is BaseNpc || entity is BaseNPC2)
             {
                 if (trace) Trace("Target is animal; allow and return", 1);
                 return true;
@@ -1359,7 +1359,7 @@ namespace Oxide.Plugins
                 return isAllowed;
             }
 
-            if (isAttacker && !attacker.userID.IsSteamId() || hitInfo.Initiator is BaseNpc)
+            if (isAttacker && !attacker.userID.IsSteamId() || hitInfo.Initiator is BaseNpc || hitInfo.Initiator is BaseNPC2)
             {
                 if (isVictim && ruleSet.HasFlag(RuleFlags.ProtectedSleepers) && entity.ToPlayer().IsSleeping())
                 {
@@ -1464,17 +1464,17 @@ namespace Oxide.Plugins
 
                 if (entity.OwnerID == 0 && entity is AdvancedChristmasLights)
                 {
-                    if (trace) Trace($"Entity is christmas lights; block and return", 1); 
+                    if (trace) Trace($"Entity is christmas lights; block and return", 1);
                     return false;
                 }
-                
+
                 if (entity is GrowableEntity)
                 {
                     bool isAllowed = entity.GetParentEntity() is not PlanterBox planter || !planter.OwnerID.IsSteamId() || IsAlly(planter.OwnerID, attacker.userID);
                     if (trace) Trace($"Entity is growable entity; {(isAllowed ? "allow ally" : "block non-ally")} and return", 1);
                     return isAllowed;
                 }
-                
+
                 if (config.SleepingBags && entity is SleepingBag)
                 {
                     if (trace) Trace("Initiator is player and target is sleeping bag; allow and return", 1);
@@ -1899,7 +1899,7 @@ namespace Oxide.Plugins
             {
                 return true;
             }
-            
+
             if (Interface.CallHook("CanMlrsTargetLocation", new object[] { mlrs, player }) is bool val)
             {
                 if (val)
@@ -2118,7 +2118,11 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private object OnNpcTarget(BaseNpc npc, BasePlayer target)
+        private object OnNpcTarget(BaseNpc npc, BasePlayer target) => OnNpcTargetInternal(npc, target);
+        
+        private object OnNpcTarget(BaseNPC2 npc, BasePlayer target) => OnNpcTargetInternal(npc, target);
+        
+        private object OnNpcTargetInternal(BaseEntity npc, BasePlayer target)
         {
             if (!target.IsValid() || !target.userID.IsSteamId() || !target.IsSleeping())
             {
@@ -2693,7 +2697,7 @@ namespace Oxide.Plugins
                         return !resValue;
                     }*/
 
-return resValue;
+                    return resValue;
                 }
 
                 if (returnDefaultValue)
@@ -3158,7 +3162,7 @@ namespace Oxide.Plugins.TruePVEExtensionMethods
         public static List<T> Distinct<T>(this IEnumerable<T> a) { var b = new List<T>(); using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (!b.Contains(c.Current)) { b.Add(c.Current); } } } return b; }
         public static bool Exists<T>(this IEnumerable<T> a, Func<T, bool> b = null) { using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (b == null || b(c.Current)) { return true; } } } return false; }
         public static IEnumerable<T> Intersect<T>(this IEnumerable<T> a, IEnumerable<T> b) { var d = new List<T>(); foreach (T item in b) { d.Add(item); } foreach (T e in a) { if (d.Remove(e)) { yield return e; } } }
-        public static T FirstOrDefault<T>(this IEnumerable<T> a, Func<T, bool> b = null) { using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (b == null || b(c.Current)) { return c.Current; } } } return default(T); }
+        public static T FirstOrDefault<T>(this IEnumerable<T> a, Func<T, bool> b = null) { using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (b == null || b(c.Current)) { return c.Current; } } } return default; }
         public static T Single<T>(this IEnumerable<T> a, Func<T, bool> b) { var d = new List<T>(); using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (b(c.Current)) { d.Add(c.Current); } } } if (d.Count > 1) throw new InvalidOperationException("single"); return d[0]; }
         public static IEnumerable<V> Select<T, V>(this IEnumerable<T> a, Func<T, V> b) { var c = new List<V>(); if (a == null) return c; using (var d = a.GetEnumerator()) { while (d.MoveNext()) { c.Add(b(d.Current)); } } return c; }
         public static string[] Skip(this string[] a, int b) { if (a.Length == 0) { return Array.Empty<string>(); } string[] c = new string[a.Length - b]; int n = 0; for (int i = 0; i < a.Length; i++) { if (i < b) continue; c[n] = a[i]; n++; } return c; }
@@ -3168,7 +3172,7 @@ namespace Oxide.Plugins.TruePVEExtensionMethods
         public static List<T> OfType<T>(this IEnumerable<BaseNetworkable> a) where T : BaseEntity { var b = new List<T>(); using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (c.Current is T) { b.Add(c.Current as T); } } } return b; }
         public static R Max<T, R>(this IList<T> a, Func<T, R> b) { R c = default(R); Comparer<R> @default = Comparer<R>.Default; for (int i = 0; i < a.Count; i++) { var d = b(a[i]); if (@default.Compare(d, c) > 0) { c = d; } } return c; }
         public static int Sum<T>(this IList<T> a, Func<T, int> b) { int c = 0; for (int i = 0; i < a.Count; i++) { var d = b(a[i]); if (!float.IsNaN(d)) { c += d; } } return c; }
-        public static bool IsKilled(this BaseNetworkable a) { try { return (object)a == null || a.IsDestroyed || a.transform == null;  } catch { return true; } }
+        public static bool IsKilled(this BaseNetworkable a) { try { return (object)a == null || a.IsDestroyed || a.transform == null; } catch { return true; } }
         public static bool IsOnline(this BasePlayer a) { return (object)a != null && (object)a.net != null && (object)a.net.connection != null; }
         public static bool IsNull<T>(this T a) where T : class { return (object)a == null; }
         public static bool CanCall(this Plugin a) { return a != null && a.IsLoaded; }
