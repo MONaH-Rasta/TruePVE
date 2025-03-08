@@ -17,7 +17,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.2.5")]
+    [Info("TruePVE", "nivex", "2.2.6")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -1059,7 +1059,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("npcs")
             {
-                members = "ch47scientists.entity, BradleyAPC, CustomScientistNpc, ScarecrowNPC, HumanNPC, NPCPlayer, ScientistNPC, TunnelDweller, SimpleShark, UnderwaterDweller, ZombieNPC"
+                members = "ch47scientists.entity, BradleyAPC, CustomScientistNpc, FarmableAnimal, ScarecrowNPC, HumanNPC, NPCPlayer, ScientistNPC, TunnelDweller, SimpleShark, UnderwaterDweller, ZombieNPC"
             });
 
             config.groups.Add(new("players")
@@ -1069,7 +1069,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("resources")
             {
-                members = "ResourceEntity, TreeEntity, OreResourceEntity, LootContainer",
+                members = "ResourceEntity, TreeEntity, OreResourceEntity, LootContainer, NaturalBeehive",
                 exclusions = "hobobarrel.deployed"
             });
 
@@ -1654,6 +1654,7 @@ namespace Oxide.Plugins
                 Trace($"To: {entity.GetType().Name}, {entity.ShortPrefabName}", 1);
             }
 
+            var ruleSet = currentRuleSet;
             if (useZones)
             {
                 // get entity and initiator locations (zones)
@@ -1665,9 +1666,9 @@ namespace Oxide.Plugins
                     if (trace) Trace("Exclusion found; allow and return", 1);
                     return true;
                 }
+                ruleSet = GetRuleSet(entityLocations, initiatorLocations);
             }
 
-            var ruleSet = currentRuleSet;
             var attacker = initiator as BasePlayer;
             var isAttacker = attacker != null && !attacker.IsDestroyed;
             var isAtkId = isAttacker && attacker.userID.IsSteamId();
@@ -2710,7 +2711,7 @@ namespace Oxide.Plugins
 #if OXIDE_PUBLICIZED || CARBON
         private void OnEntitySpawned(RidableHorse2 horse)
         {
-            if (config.PreventRagdolling)
+            if (config.PreventRagdolling && horse != null)
             {
                 horse.playerRagdollThreshold = float.MaxValue;
             }
@@ -2718,7 +2719,7 @@ namespace Oxide.Plugins
 
         private void CanRagdollDismount(BaseRagdoll ragdoll, BasePlayer player)
         {
-            if (config.PreventRagdolling)
+            if (config.PreventRagdolling && ragdoll != null)
             {            
                 ragdoll.dieOnImpact = false;
             }
@@ -3260,28 +3261,13 @@ namespace Oxide.Plugins
             return false;
         }
 
-        public bool HasEmptyMapping(string key)
-        {
-            if (config.mappings.ContainsKey(AllZones) && config.mappings[AllZones].Equals("exclude")) return true; // exclude all zones
-            if (!config.mappings.ContainsKey(key)) return false;
-            if (config.mappings[key].Equals("exclude")) return true;
-            RuleSet r = null;
-            foreach (var ruleSet in config.ruleSets)
-            {
-                if (ruleSet.name.Equals(config.mappings[key]))
-                {
-                    r = ruleSet;
-                    break;
-                }
-            }
-            return r == null || r.IsEmpty();
-        }
-
         // add or update a mapping
         private bool AddOrUpdateMapping(string key, string ruleset)
         {
             if (string.IsNullOrEmpty(key) || config == null || ruleset == null || (ruleset != "exclude" && !config.ruleSets.Exists(r => r.name == ruleset)))
+            {
                 return false;
+            }
 
             config.mappings[key] = ruleset;
             SaveConfig();
