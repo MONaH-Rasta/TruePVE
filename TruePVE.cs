@@ -17,7 +17,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.2.6")]
+    [Info("TruePVE", "nivex", "2.2.7")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -1059,7 +1059,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("npcs")
             {
-                members = "ch47scientists.entity, BradleyAPC, CustomScientistNpc, FarmableAnimal, ScarecrowNPC, HumanNPC, NPCPlayer, ScientistNPC, TunnelDweller, SimpleShark, UnderwaterDweller, ZombieNPC"
+                members = "ch47scientists.entity, BradleyAPC, CustomScientistNpc, ScarecrowNPC, HumanNPC, NPCPlayer, ScientistNPC, TunnelDweller, SimpleShark, UnderwaterDweller, ZombieNPC"
             });
 
             config.groups.Add(new("players")
@@ -1112,6 +1112,11 @@ namespace Oxide.Plugins
             {
                 members = "BeeSwarmAI, Beehive, BeeGrenade, BeeSwarmMaster, NaturalBeehive"
             });
+
+            config.groups.Add(new("farm")
+            {
+                members = "simplechicken.entity, FarmableAnimal, ChickenCoop"
+            });
         }
 
         protected void BuildDefaultRuleset()
@@ -1158,6 +1163,7 @@ namespace Oxide.Plugins
             defaultRuleSet.AddRule(this, "heliturrets cannot hurt players");
             defaultRuleSet.AddRule(this, "ramhead can hurt ramhead");
             defaultRuleSet.AddRule(this, "siege cannot hurt players");
+            defaultRuleSet.AddRule(this, "players cannot hurt farm");
 
             config.ruleSets.Add(defaultRuleSet); // add ruleset to rulesets list
         }
