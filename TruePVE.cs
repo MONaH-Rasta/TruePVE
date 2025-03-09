@@ -17,7 +17,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.2.7")]
+    [Info("TruePVE", "nivex", "2.2.8")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -1208,7 +1208,7 @@ namespace Oxide.Plugins
 
             if (shouldLogToConsole)
             {
-                _tsb.AppendLine(new string(' ', indentation)).Append(message);
+                _tsb.Append(new string(' ', indentation)).AppendLine(message);
             }
         }
 
@@ -2112,7 +2112,7 @@ namespace Oxide.Plugins
                         return true;
                     }
                 }
-                else if ((_flags & RuleFlags.AuthorizedDamage) != 0 && !isVictim && !entity.IsNpc && isAtkId)
+                else if ((_flags & RuleFlags.AuthorizedDamage) != 0 && !isVictim && !entity.IsNpc && isAtkId && !(entity is FarmableAnimal))
                 { // ignore checks if authorized damage enabled (except for players and npcs)
                     if ((_flags & RuleFlags.AuthorizedDamageCheckPrivilege) != 0)
                     {
@@ -2325,6 +2325,7 @@ namespace Oxide.Plugins
             }
             if (trace)
             {
+                if (entity is FarmableAnimal || entity is ChickenCoop) allow = false;
                 string action = allow ? "allow and return" : "block and return";
                 Trace($"Initiator is heli, target is {entity.ShortPrefabName}; {action}", 1);
             }
@@ -2364,7 +2365,7 @@ namespace Oxide.Plugins
 
         private bool IsPlayerEntity(BaseEntity entity)
         {
-            if (entity is BaseMountable || entity is LegacyShelter || entity is LegacyShelterDoor)
+            if (entity is BaseMountable || entity is LegacyShelter || entity is LegacyShelterDoor || entity is FarmableAnimal)
             {
                 return true;
             }
