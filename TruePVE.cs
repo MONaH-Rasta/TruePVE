@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.0")]
+    [Info("TruePVE", "nivex", "2.3.1")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -1273,6 +1273,10 @@ namespace Oxide.Plugins
             if (!AllowDamage(entity, info))
             {
                 if (trace) LogTrace();
+                if (info.Weapon is BlowPipeWeapon)
+                {
+                    info.HitEntity = null;
+                }
                 info.damageTypes?.Clear();
                 info.DidHit = false;
                 info.DoHitEffects = false;
