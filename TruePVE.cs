@@ -19,7 +19,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.2")]
+    [Info("TruePVE", "nivex", "2.3.3")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -231,7 +231,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnEntitySpawned));
             Unsubscribe(nameof(OnEntityEnter));
             Unsubscribe(nameof(OnTurretTarget));
-            //Unsubscribe(nameof(OnTimedExplosiveExplode));
+            Unsubscribe(nameof(OnTimedExplosiveExplode));
             Unsubscribe(nameof(OnWallpaperRemove));
             Unsubscribe(nameof(OnEntityTakeDamage));
             Unsubscribe(nameof(OnPlayerConnected));
@@ -328,7 +328,7 @@ namespace Oxide.Plugins
             if (config.wallpaper)
             {
                 Subscribe(nameof(OnWallpaperRemove));
-                //Subscribe(nameof(OnTimedExplosiveExplode));
+                Subscribe(nameof(OnTimedExplosiveExplode));
             }
             if (config.options.Loot.ProtectTC)
             {
@@ -1241,13 +1241,13 @@ namespace Oxide.Plugins
 
         private bool IsEnabled() => tpveEnabled;
 
-        //private void OnTimedExplosiveExplode(TimedExplosive explosive, Vector3 explosionFxPos)
-        //{
-            //if (explosive != null)
-            //{
-            //    explosive.splashWallpaperThroughWalls = false;
-            //}
-        //}
+        private void OnTimedExplosiveExplode(TimedExplosive explosive, Vector3 explosionFxPos)
+        {
+            if (explosive != null)
+            {
+                explosive.splashWallpaperThroughWalls = false;
+            }
+        }
 
         private object OnWallpaperRemove(BuildingBlock block, int side)
         {
