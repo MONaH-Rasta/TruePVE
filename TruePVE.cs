@@ -19,7 +19,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.3")]
+    [Info("TruePVE", "nivex", "2.3.4")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -2104,7 +2104,7 @@ namespace Oxide.Plugins
                     return false;
                 }
 
-                if (entity.OwnerID == 0 && entity is AdvancedChristmasLights)
+                if (entity.OwnerID == 0 && entity is ChristmasLights)
                 {
                     if (trace) Trace($"Entity is christmas lights; block and return", 1);
                     return false;
@@ -3920,7 +3920,7 @@ namespace Oxide.Plugins
         {
             if (!string.IsNullOrEmpty(key) && config.mappings.Remove(key))
             {
-                if (_removeMappingTimer != null) _removeMappingTimer.Reset();
+                if (_removeMappingTimer is { Destroyed: false }) _removeMappingTimer.Reset();
                 else _removeMappingTimer = timer.Once(1f, SaveConfig);
                 SetUseZones();
                 return true;
