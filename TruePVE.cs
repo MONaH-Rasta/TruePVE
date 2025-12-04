@@ -19,7 +19,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.4")]
+    [Info("TruePVE", "nivex", "2.3.5")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -163,6 +163,18 @@ namespace Oxide.Plugins
 		
         private void Unload()
         {
+            bool save = false;
+            if (_removeMappingTimer is { Destroyed: false })
+            {
+                _removeMappingTimer.Destroy();
+                SaveConfig();
+                save = true;
+            }
+            if (_auMappingTimer is { Destroyed: false })
+            {
+                _auMappingTimer.Destroy();
+                if (!save) SaveConfig();
+            }
             IsUnloading = true;
             scheduleUpdateTimer?.Destroy();
             SaveData();
@@ -343,6 +355,7 @@ namespace Oxide.Plugins
             Subscribe(nameof(OnMlrsFire));
             BuildPrefabIds();
             AllowLocksOnContainers();
+            RemoveTemporaryZones();
         }
 
         private IEnumerator OvenCo()
@@ -435,7 +448,7 @@ namespace Oxide.Plugins
                 {
                     continue;
                 }
-                if (!data.LastSeen.ContainsKey(sleeper.userID))
+                if (!data.LastSeen.ContainsKey(sleeper.userID) && !sleeper.IsBuildingAuthed(true))
                 {
                     data.LastSeen[sleeper.userID] = Epoch.Current;
                     changed = true;
@@ -464,6 +477,11 @@ namespace Oxide.Plugins
             }
             if (!data.LastSeen.TryGetValue(player.userID, out var lastSeen))
             {
+                return false;
+            }
+            if (player.IsBuildingAuthed(true))
+            {
+                data.LastSeen.Remove(player.userID);
                 return false;
             }
             double timeOffline = Epoch.Current - lastSeen;
@@ -799,12 +817,17 @@ namespace Oxide.Plugins
                 BuildDefaultRuleset();
                 Puts("Loaded default rulesets (no rulesets were configured)");
             }
+            if (config._AllowKillingSleepersAuthorization != null)
+            {
+                config.AllowKillingSleepersAuthorization.Enabled = config._AllowKillingSleepersAuthorization.Value;
+                config._AllowKillingSleepersAuthorization = null;
+            }
             TryUpdateConfig();
             config.configVersion = Version.ToString();
             CheckMappings();
             BuildRuleSetDictionary();
             BuildExclusionMappings();
-            _allowKillingSleepersEnabled = config.AllowKillingSleepersAlly || config.AllowKillingSleepers || config.AllowKillingSleepersAuthorization || config.AllowKillingSleepersIds.Exists(x => x.IsSteamId());
+            _allowKillingSleepersEnabled = config.AllowKillingSleepersAlly || config.AllowKillingSleepers || config.AllowKillingSleepersAuthorization.Enabled || config.AllowKillingSleepersIds.Exists(x => x.IsSteamId());
             _blockOutputHandlerEnabled = config.options.BlockHandler.Any; 
             _pvpReflectionEnabled = config.options.Reflect.Any;
             _canKillOfflinePlayerEnabled = config.AllowKillingSleepersHoursOffline > 0;
@@ -999,7 +1022,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("fire")
             {
-                members = "FireBall, FlameExplosive, FlameThrower, BaseOven, FlameTurret, rocket_heli_napalm, napalm, oilfireball2"
+                members = "FireBall, FlameExplosive, FlameThrower, BaseOven, FlameTurret, napalm, oilfireball2"
             });
 
             config.groups.Add(new("guards")
@@ -1480,7 +1503,7 @@ namespace Oxide.Plugins
         {
             if (entity is BasePlayer victim && victim.userID.IsSteamId() && victim.IsSleeping())
             {
-                if (config.AllowKillingSleepersAuthorization && initiator is BasePlayer attacker && AllowAuthorizationDamage(victim, attacker))
+                if (config.AllowKillingSleepersAuthorization.Enabled && initiator is BasePlayer attacker && AllowAuthorizationDamage(victim, attacker))
                 {
                     return true;
                 }
@@ -1497,50 +1520,80 @@ namespace Oxide.Plugins
             return false;
         }
 
-        private static bool AllowAuthorizationDamage(BasePlayer victim, BasePlayer attacker)
+        private bool AllowAuthorizationDamage(BasePlayer victim, BasePlayer attacker)
         {
             if (!attacker.userID.IsSteamId())
             {
                 return false;
             }
-            if (victim.GetParentEntity() is Tugboat tugboat && tugboat.IsAuthed(attacker))
+            Tugboat tugboat = victim.GetParentEntity() as Tugboat;
+            if (tugboat != null && IsAuthed(tugboat, attacker.userID))
             {
                 return true;
             }
-            if (victim.GetBuildingPrivilege(true) is BuildingPrivlidge priv && priv.IsAuthed(attacker))
+            BuildingPrivlidge priv = victim.GetBuildingPrivilege(true);
+            if (priv != null && priv.authorizedPlayers.Contains(attacker.userID))
             {
-                return true;
+                return config.AllowKillingSleepersAuthorization.MeetsMinimumRequirements(priv);
             }
             return false;
         }
 
         private static bool IsAuthed(DroppedItem entity, BaseEntity attacker)
         {
-            return entity.GetBuildingPrivilege(entity.WorldSpaceBounds(), true) is BuildingPrivlidge priv && priv != null && priv.AnyAuthed() && priv.IsAuthed(entity.DroppedBy);
+            if (entity == null || entity.IsDestroyed) return false;
+            BuildingPrivlidge priv = entity.GetBuildingPrivilege(entity.WorldSpaceBounds(), true);
+            return priv != null && priv.authorizedPlayers.Contains(entity.DroppedBy);
         }
 
         private static bool IsAuthed(PlayerCorpse entity, BaseEntity attacker)
         {
-            return entity.GetBuildingPrivilege(entity.WorldSpaceBounds(), true) is BuildingPrivlidge priv && priv != null && priv.AnyAuthed() && priv.IsAuthed(entity.playerSteamID);
+            if (entity == null || entity.IsDestroyed) return false;
+            BuildingPrivlidge priv = entity.GetBuildingPrivilege(entity.WorldSpaceBounds(), true);
+            return priv != null && priv.authorizedPlayers.Contains(entity.playerSteamID);
         }
 
         private static bool IsAuthed(DecayEntity entity, BasePlayer attacker)
         {
             if (entity is LegacyShelter || entity is LegacyShelterDoor)
             {
-                return entity.GetEntityBuildingPrivilege() is EntityPrivilege entityPriv && entityPriv.AnyAuthed() && entityPriv.IsAuthed(attacker);
+                EntityPrivilege entityPriv = entity.GetEntityBuildingPrivilege();
+                return entityPriv != null && entityPriv.authorizedPlayers.Contains(attacker.userID);
             }
-            return entity.GetBuilding() is BuildingManager.Building building && building.GetDominatingBuildingPrivilege() is BuildingPrivlidge priv && priv.AnyAuthed() && priv.IsAuthed(attacker);
+            BuildingManager.Building building = entity.GetBuilding();
+            if (building != null)
+            {
+                BuildingPrivlidge priv = building.GetDominatingBuildingPrivilege();
+                if (priv != null)
+                {
+                    return priv.authorizedPlayers.Contains(attacker.userID);
+                }
+            }
+            BuildingPrivlidge priv2 = entity.GetBuildingPrivilege(entity.WorldSpaceBounds(), true);
+            return priv2 != null && priv2.authorizedPlayers.Contains(attacker.userID);
         }
 
-        private static bool IsAuthed(Tugboat tugboat, BasePlayer attacker)
+        private static bool IsAuthed(Tugboat tugboat, ulong userid)
         {
-            return !tugboat.children.IsNullOrEmpty() && tugboat.children.Exists(child => child is VehiclePrivilege vehiclePrivilege && vehiclePrivilege.AnyAuthed() && vehiclePrivilege.IsAuthed(attacker));
+            if (tugboat.children == null)
+            {
+                return false;
+            }
+            foreach (var child in tugboat.children)
+            {
+                VehiclePrivilege priv = child as VehiclePrivilege;
+                if (priv != null && priv.authorizedPlayers.Contains(userid))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static bool IsAuthed(BaseHelicopter heli, BasePlayer attacker)
         {
-            return attacker.GetBuildingPrivilege(heli.WorldSpaceBounds(), true) is BuildingPrivlidge priv && priv.AnyAuthed() && priv.IsAuthed(attacker);
+            BuildingPrivlidge priv = attacker.GetBuildingPrivilege(heli.WorldSpaceBounds(), true);
+            return priv != null && priv.authorizedPlayers.Contains(attacker.userID);
         }
 
         // determines if an entity is "allowed" to take damage
@@ -1607,6 +1660,12 @@ namespace Oxide.Plugins
                 return true;
             }
 
+            if (weapon != null && IsSkinExclusion(weapon))
+            {
+                if (trace) Trace($"Target is {entity}; allow and return -> {weapon} skin ID {weapon.skinID}", 1);
+                return true;
+            }
+
             if (config.scrap)
             {
                 if (victim != null && weapon is ScrapTransportHelicopter)
@@ -1663,6 +1722,10 @@ namespace Oxide.Plugins
                   "==  STARTING TRACE  ==" + Environment.NewLine +
                   "==  " + DateTime.Now.ToString("HH:mm:ss.fffff") + "  ==" + Environment.NewLine +
                   "======================");
+                //string weaponid = $"{(weapon != null ? weapon.OwnerID : (info.Initiator != null ? $"initiator '{info.Initiator.OwnerID}' & creator: '{info.Initiator.creatorEntity?.OwnerID ?? 0}'" : 0))}";
+                //string weaponce = $"{(weapon != null ? weapon.creatorEntity : string.Empty)}";
+                //string weaponpr = $"{(weapon != null ? weapon.ShortPrefabName : (info.Initiator != null ? $"initiator '{info.Initiator}' & creator: '{info.Initiator.creatorEntity}'" : "Unknown_Prefab"))}";
+                //Trace($"From: {GetTypeName(weapon, "Unknown_Weapon")}, {weaponpr} {weaponce} {weaponid}", 1);
                 Trace($"From: {GetTypeName(weapon, "Unknown_Weapon")}, {weapon?.ShortPrefabName ?? "Unknown_Prefab"}", 1);
                 Trace($"To: {GetTypeName(entity)}, {entity.ShortPrefabName}", 1);
             }
@@ -2169,12 +2232,12 @@ namespace Oxide.Plugins
                             if (trace) Trace("Initiator is player with heli priv over target; allow and return", 1);
                             return true;
                         }
-                        if (entity is Tugboat tugboat && IsAuthed(tugboat, attacker))
+                        if (entity is Tugboat tugboat && IsAuthed(tugboat, attacker.userID))
                         {
                             if (trace) Trace("Initiator is player with tugboat priv over target; allow and return", 1);
                             return true;
                         }
-                        if (entity.HasParent() && entity.GetParentEntity() is Tugboat tugboat2 && IsAuthed(tugboat2, attacker))
+                        if (entity.HasParent() && entity.GetParentEntity() is Tugboat tugboat2 && IsAuthed(tugboat2, attacker.userID))
                         {
                             if (trace) Trace("Initiator is player with tugboat priv over target; allow and return", 1);
                             return true;
@@ -2830,6 +2893,12 @@ namespace Oxide.Plugins
                 return true;
             }
 
+            if (attacker != null && IsSkinExclusion(attacker))
+            {
+                if (trace) Trace($"Target is {entity}; allow and return -> {attacker} skin ID {attacker.skinID}", 1);
+                return null;
+            }
+
             RuleSet ruleSet = GetRuleSet(entity, attacker);
 
             if (ruleSet == null)
@@ -2870,6 +2939,12 @@ namespace Oxide.Plugins
                 return true;
             }
 
+            //if (IsSkinExclusion(mlrs))
+            //{
+            //    if (trace) Trace($"MLRS attacker is {player}; allow and return -> {mlrs} skin ID {mlrs.skinID}", 1);
+            //    return null;
+            //}
+
             RuleSet ruleSet = GetRuleSet(player, mlrs);
 
             if (ruleSet == null)
@@ -2898,7 +2973,22 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private object OnEntityMarkHostile(BasePlayer player, float duration) => true;
+        private object OnEntityMarkHostile(BasePlayer player, float duration)
+        {
+            if (player == null || Interface.CallHook("CanMarkEntityHostile", player, duration) is bool val && val)
+            {
+                return null;
+            }
+            return true;
+        }
+
+        private void OnExplosiveDropped(BasePlayer player, TimedExplosive te, ThrownWeapon tw)
+        {
+            if (player != null && te != null && te.creatorPlayer == null)
+            {
+                te.creatorPlayer = player;
+            }
+        }
 
 #if OXIDE_PUBLICIZED || CARBON
         private void OnEntitySpawned(RidableHorse horse)
@@ -2930,7 +3020,7 @@ namespace Oxide.Plugins
         private int wrongCodes;
         private object OnCodeEntered(CodeLock codeLock, BasePlayer player, string code)
         {
-            if (codeLock == null || player == null || player.limitNetworking) 
+            if (codeLock == null || player == null || player.limitNetworking || player.isInvisible) 
                 return null;
             var parent = codeLock.GetParentEntity() as BaseEntity;
             if (parent != null && parent.OwnerID.IsSteamId() && !IsAlly(player.userID, parent.OwnerID))
@@ -3238,7 +3328,7 @@ namespace Oxide.Plugins
 
         private object OnCupboardAuthorize(BuildingPrivlidge priv, BasePlayer player)
         {
-            if (player == null || priv == null || !priv.OwnerID.IsSteamId()) return null;
+            if (player == null || player.limitNetworking || player.isInvisible || priv == null || !priv.OwnerID.IsSteamId()) return null;
             BaseLock baseLock = priv.GetSlot(BaseEntity.Slot.Lock) as BaseLock;
             if (baseLock != null && baseLock.IsLocked()) return null;
             if (IsAlly(priv.OwnerID, player.userID)) return null;
@@ -3306,6 +3396,8 @@ namespace Oxide.Plugins
             return false;
         }
 
+        private bool IsSkinExclusion(BaseEntity entity) => entity != null && entity.skinID != 0 && config.options.SkinExclusions.Count > 0 && config.options.SkinExclusions.Contains(entity.skinID);
+
         private object SamSiteHelper(BaseEntity attacker, BaseEntity entity)
         {
             if (useZones)
@@ -3370,6 +3462,12 @@ namespace Oxide.Plugins
             if (Interface.CallHook("CanEntityBeTargeted", new object[] { target, entity }) is bool val)
             {
                 return val ? (object)null : true;
+            }
+
+            if (entity != null && IsSkinExclusion(entity))
+            {
+                //if (trace) Trace($"Target is {target}; allow and return -> {entity} skin ID {entity.skinID}", 1);
+                return null;
             }
 
             RuleSet ruleSet = GetRuleSet(target, entity);
@@ -3446,6 +3544,12 @@ namespace Oxide.Plugins
             if (Interface.CallHook("CanEntityBeTargeted", new object[] { target, entity }) is bool val)
             {
                 return val ? (object)null : true;
+            }
+
+            if (entity != null && IsSkinExclusion(entity))
+            {
+                //if (trace) Trace($"Target is {target}; allow and return -> {entity} skin ID {entity.skinID}", 1);
+                return null;
             }
 
             RuleSet ruleSet = GetRuleSet(target, entity);
@@ -3898,7 +4002,15 @@ namespace Oxide.Plugins
             return false;
         }
 
+        private Dictionary<string, string> _mappings = new();
+        private void SetExposedMappings()
+        {
+            _mappings.Clear();
+            GetMappingsDictionaryNoAlloc(_mappings);
+        }
+
         // add or update a mapping
+        private Timer _auMappingTimer;
         private bool AddOrUpdateMapping(string key, string ruleset)
         {
             if (string.IsNullOrEmpty(key) || config == null || ruleset == null || (ruleset != "exclude" && !config.ruleSets.Exists(r => r.name == ruleset)))
@@ -3907,9 +4019,16 @@ namespace Oxide.Plugins
             }
 
             config.mappings[key] = ruleset;
-            SaveConfig();
             TryBuildExclusionMappings();
             SetUseZones();
+            
+            if (_auMappingTimer is { Destroyed: false }) _auMappingTimer.Reset();
+            else _auMappingTimer = timer.Once(1f, () =>
+            {
+                SaveConfig();
+                SetExposedMappings();
+                Interface.CallHook("OnUpdatedMappings", _mappings);
+            });
 
             return true;
         }
@@ -3921,7 +4040,12 @@ namespace Oxide.Plugins
             if (!string.IsNullOrEmpty(key) && config.mappings.Remove(key))
             {
                 if (_removeMappingTimer is { Destroyed: false }) _removeMappingTimer.Reset();
-                else _removeMappingTimer = timer.Once(1f, SaveConfig);
+                else _removeMappingTimer = timer.Once(1f, () =>
+                {
+                    SaveConfig();
+                    SetExposedMappings();
+                    Interface.CallHook("OnRemovedMappings", _mappings);
+                });
                 SetUseZones();
                 return true;
             }
@@ -4036,6 +4160,37 @@ namespace Oxide.Plugins
 
         #region Helper Procedures
 
+        private bool RemoveTemporaryZones()
+        {
+            using var zones = Facepunch.Pool.Get<PooledList<string>>();
+            using var mappings = Facepunch.Pool.Get<PooledList<string>>();
+
+            return RemoveTemporaryZones(zones, mappings);
+        }
+
+        private bool RemoveTemporaryZones(List<string> zones, List<string> mappings)
+        {
+            if (ZoneManager == null) 
+                return false;
+
+            if (zones.Count == 0)
+                ZoneManager.Call("GetZoneIDsNoAlloc", zones);
+
+            if (mappings.Count == 0)
+                GetMappingsListNoAlloc(mappings);
+
+            bool any = false;
+            foreach (var mapping in mappings)
+            {
+                if (!zones.Contains(mapping) && mapping.IsNumeric() && RemoveMapping(mapping))
+                {
+                    any = true;
+                }
+            }
+
+            return any;
+        }
+
         // get location keys from ZoneManager (zone IDs) or LiteZones (zone names)
         private PooledList<string> GetLocationKeys(BaseEntity entity)
         {
@@ -4135,7 +4290,7 @@ namespace Oxide.Plugins
                 if (config.schedule.broadcast && !string.IsNullOrEmpty(currentBroadcastMessage))
                 {
                     Server.Broadcast(currentBroadcastMessage, GetMessage("Prefix"));
-                    Puts(RemoveFormatting(GetMessage("Prefix") + " Schedule Broadcast: " + currentBroadcastMessage));
+                    Puts(RemoveFormatting(" Schedule Broadcast: " + currentBroadcastMessage));
                 }
             }
 
@@ -4207,6 +4362,9 @@ namespace Oxide.Plugins
 
         private class ConfigurationOptions
         {
+            [JsonProperty(PropertyName = "Entities with these skin ID's can hurt anything")]
+            public List<ulong> SkinExclusions = new();
+
             [JsonProperty(PropertyName = "Armor damage (PVE)")]
             public ArmorDamagePVE ArmorDamage = new();
 
@@ -4263,6 +4421,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Allow Thirst And Hunger Damage To Farmable Animals")]
             public bool FarmableMetabolism = true;
+
+            [JsonProperty(PropertyName = "Auto remove mappings that no longer exist on server restart")]
+            public bool AutoRemove;
         }
 
         private class LootSupport
@@ -4340,6 +4501,185 @@ namespace Oxide.Plugins
             };
         }
 
+        private class SleeperAuthorizationOptions
+        {
+            [JsonProperty(PropertyName = "Enabled")]
+            public bool Enabled;
+
+            [JsonProperty(PropertyName = "Distinct Loot Required (performance heavy)")]
+            public int BaseLoot;
+
+            [JsonProperty(PropertyName = "Foundations Required (performance heavy)")]
+            public int FoundationLimit;
+
+            [JsonProperty(PropertyName = "Walls Required (performance heavy)")]
+            public int WallLimit;
+
+            [JsonProperty(PropertyName = "Include Twig Structures (performance heavy)")]
+            public bool Twig;
+
+            [JsonProperty(PropertyName = "Include Wood Structures (performance heavy)")]
+            public bool Wood;
+
+            [JsonProperty(PropertyName = "Skip above checks when the entity count of a base exceeds X (performance heavy)")]
+            public int EntityOverrideLimit;
+
+            internal Dictionary<uint, bool> _cache = new();
+            internal List<string> ID_FLOORS = new() { "floor", "floor.frame", "floor.grill", "floor.ladder.hatch", "floor.triangle", "floor.triangle.frame", "floor.triangle.grill", "floor.triangle.ladder.hatch" };
+
+            internal bool Checks => BaseLoot > 0 || FoundationLimit > 0 || WallLimit > 0;
+
+            internal bool Any => Checks || EntityOverrideLimit > 0;
+
+            internal List<string> shortnames = new();
+            
+            internal List<ItemContainer> buffer = new();
+
+            public bool MeetsMinimumRequirements(BuildingPrivlidge priv)
+            {
+                if (!Any)
+                    return true;
+
+                if (_cache.TryGetValue(priv.buildingID, out bool value))
+                    return value;
+                
+                BuildingManager.Building building = priv.GetBuilding();
+                if (building == null || !building.HasDecayEntities()) 
+                    return false;
+
+                uint ID = building.ID;
+                int count = building.decayEntities.Count;
+
+                if (EntityOverrideLimit > 0 && count > EntityOverrideLimit)
+                {
+                    _cache[ID] = true;
+                    return true;
+                }
+
+                if (!Checks)
+                    return true;
+
+                shortnames.Clear();
+                buffer.Clear();
+
+                int walls = 0, foundations = 0, floors = 0, counted = 0;
+
+                foreach (var e in building.decayEntities)
+                {
+                    if (e == null || e.IsDestroyed)
+                    {
+                        continue;
+                    }
+                    if (++counted % 10 == 0 && Performance.report.frameRate < 15)
+                    {
+                        return false;
+                    }
+                    if (BaseLoot <= 0 && !(e is BuildingBlock))
+                    {
+                        continue;
+                    }
+                    if (FoundationLimit > 0)
+                    {
+                        if (e.ShortPrefabName == "foundation" || e.ShortPrefabName == "foundation.triangle")
+                        {
+                            BuildingBlock block = e as BuildingBlock;
+                            if (!Twig && block.grade == BuildingGrade.Enum.Twigs)
+                            {
+                                continue;
+                            }
+                            if (!Wood && block.grade == BuildingGrade.Enum.Wood)
+                            {
+                                continue;
+                            }
+                            foundations++;
+                            continue;
+                        }
+                    }
+                    if (WallLimit > 0)
+                    {
+                        if (e.ShortPrefabName == "wall" || e.ShortPrefabName == "wall.half" || e.ShortPrefabName == "wall.window")
+                        {
+                            BuildingBlock block = e as BuildingBlock;
+                            if (!Twig && block.grade == BuildingGrade.Enum.Twigs)
+                            {
+                                continue;
+                            }
+                            if (!Wood && block.grade == BuildingGrade.Enum.Wood)
+                            {
+                                continue;
+                            }
+                            walls++;
+                            continue;
+                        }
+                        if (ID_FLOORS.Contains(e.ShortPrefabName))
+                        {
+                            if (e.children != null)
+                            {
+                                foreach (var x in e.children)
+                                {
+                                    if (x is CollectibleEntity col && col != null && col.itemList == null)
+                                    {
+                                        foundations++;
+                                    }
+                                }
+                            }
+                            floors++;
+                            continue;
+                        }
+                    }
+                    if (BaseLoot > 0)
+                    {
+                        AddDistinctBaseLoot(shortnames, buffer, e);
+                    }
+                }
+
+                if (foundations == 0)
+                {
+                    foundations = floors;
+                }
+
+                bool wallCheck = WallLimit <= 0 || walls >= WallLimit;
+                bool foundationCheck = FoundationLimit <= 0 || FoundationLimit >= foundations;
+                bool baseLootCheck = BaseLoot <= 0 || shortnames.Count >= BaseLoot;
+
+                _cache[ID] = value = wallCheck && foundationCheck && baseLootCheck;
+                if (!value) priv.Invoke(() => _cache.Remove(ID), 15f);
+                return value;
+            }
+
+            private static void AddDistinctBaseLoot(List<string> shortnames, List<ItemContainer> containers, DecayEntity ent)
+            {
+                IInventoryProvider provider = ent as IInventoryProvider;
+                if (provider == null)
+                {
+                    return;
+                }
+
+                provider.GetAllInventories(containers);
+                if (containers.Count == 0)
+                {
+                    return;
+                }
+
+                foreach (ItemContainer container in containers)
+                {
+                    if (container == null || container.itemList == null)
+                    {
+                        continue;
+                    }
+                    foreach (Item item in container.itemList)
+                    {
+                        if (item != null && item.info != null && !shortnames.Contains(item.info.shortname))
+                        {
+                            shortnames.Add(item.info.shortname);
+                        }
+                    }
+                }
+
+                containers.Clear();
+            }
+        }
+
         private class Configuration
         {
             [JsonProperty(PropertyName = "Config Version")]
@@ -4369,8 +4709,11 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Allow Killing Sleepers (Ally Only)")]
             public bool AllowKillingSleepersAlly;
 
-            [JsonProperty(PropertyName = "Allow Killing Sleepers (Authorization Only)")]
-            public bool AllowKillingSleepersAuthorization;
+            [JsonProperty(PropertyName = "Allow Killing Sleepers (Authorization Only)", NullValueHandling = NullValueHandling.Ignore)]
+            public bool? _AllowKillingSleepersAuthorization = null;
+
+            [JsonProperty(PropertyName = "Allow Killing Sleepers (TC Auth Only)")]
+            public SleeperAuthorizationOptions AllowKillingSleepersAuthorization = new();
 
             [JsonProperty(PropertyName = "Allow Killing Sleepers (After X Hours Offline)")]
             public float AllowKillingSleepersHoursOffline;
@@ -5000,23 +5343,18 @@ namespace Oxide.Plugins
                     }
                 }
 
-                // Step 2: Find the most recent valid non-daily entry
+                // Step 2: Find the most recent valid non-daily entry <= currentTime
                 if (hasNonDaily)
                 {
                     TimeSpan? maxTime = null;
                     foreach (var entry in parsedEntries)
                     {
-                        if (entry.valid && entry.time <= currentTime)
-                        {
-                            if (useRealtime && entry.isDaily)
-                            {
-                                continue; // Skip daily entries if useRealtime is true
-                            }
+                        if (!entry.valid || entry.isDaily) continue; // only non-daily here
 
+                        if (entry.time <= currentTime)
+                        {
                             if (!maxTime.HasValue || entry.time > maxTime.Value)
-                            {
                                 maxTime = entry.time;
-                            }
                         }
                     }
 
@@ -5024,12 +5362,30 @@ namespace Oxide.Plugins
                     {
                         foreach (var entry in parsedEntries)
                         {
-                            if (entry.time == maxTime.Value)
+                            if (entry.valid && !entry.isDaily && entry.time == maxTime.Value)
                             {
                                 se = entry;
                                 break; // Exit once the first matching entry is found
                             }
                         }
+                    }
+                    else
+                    {
+                        // No non-daily entry in the current week segment (e.g., it's early Sunday).
+                        // Fall back to the latest non-daily entry overall (previous week's last).
+                        TimeSpan latest = TimeSpan.MinValue;
+                        ScheduleEntry latestEntry = null;
+                        foreach (var entry in parsedEntries)
+                        {
+                            if (!entry.valid || entry.isDaily) continue;
+                            if (entry.time > latest)
+                            {
+                                latest = entry.time;
+                                latestEntry = entry;
+                            }
+                        }
+                        if (latestEntry != null)
+                            se = latestEntry;
                     }
                 }
 
@@ -5057,7 +5413,7 @@ namespace Oxide.Plugins
                     {
                         foreach (var entry in parsedEntries)
                         {
-                            if (entry.isDaily && entry.valid && entry.time == maxDailyTime)
+                            if (entry.valid && entry.isDaily && entry.time == maxDailyTime)
                             {
                                 daily = entry;
                                 break;
@@ -5066,17 +5422,16 @@ namespace Oxide.Plugins
                     }
                     else
                     {
+                        // No daily entry earlier today -> use the last daily of the day
                         TimeSpan lastTime = TimeSpan.Zero;
                         ScheduleEntry lastEntry = null;
                         foreach (var entry in parsedEntries)
                         {
-                            if (entry.valid && entry.isDaily)
+                            if (!entry.valid || !entry.isDaily) continue;
+                            if (lastEntry == null || entry.time > lastTime)
                             {
-                                if (lastEntry == null || entry.time > lastTime)
-                                {
-                                    lastTime = entry.time;
-                                    lastEntry = entry;
-                                }
+                                lastTime = entry.time;
+                                lastEntry = entry;
                             }
                         }
                         daily = lastEntry;
@@ -5084,20 +5439,14 @@ namespace Oxide.Plugins
 
                     if (daily != null)
                     {
-                        if (se == null)
+                        // Compare on the same "week clock" axis
+                        // Create a TimeSpan representing the day's offset
+                        TimeSpan dayOffset = new((int)DateTime.Now.DayOfWeek, 0, 0, 0);
+                        TimeSpan dailyAdjustedTime = daily.time.Add(dayOffset);
+
+                        if (se == null || dailyAdjustedTime > se.time)
                         {
                             se = daily;
-                        }
-                        else
-                        {
-                            // Create a TimeSpan representing the day's offset
-                            TimeSpan dayOffset = new((int)DateTime.Now.DayOfWeek, 0, 0, 0);
-                            TimeSpan dailyAdjustedTime = daily.time.Add(dayOffset);
-
-                            if (dailyAdjustedTime > se.time)
-                            {
-                                se = daily;
-                            }
                         }
                     }
                 }
