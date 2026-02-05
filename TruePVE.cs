@@ -19,7 +19,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.6")]
+    [Info("TruePVE", "nivex", "2.3.7")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -3091,7 +3091,7 @@ namespace Oxide.Plugins
 
         private object isPlayerProtected(BasePlayer looter, BaseEntity target, ulong? ownerID, bool f)
         {
-            if (!f || !ownerID.HasValue || ownerID == 0 || looter == null || target == null) return null;
+            if (!f || !ownerID.HasValue || ownerID == 0 || !ownerID.Value.IsSteamId() || looter == null || target == null) return null;
             if (canBypass(looter)) return null;
             if (useZones)
             {
