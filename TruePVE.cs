@@ -19,7 +19,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.5")]
+    [Info("TruePVE", "nivex", "2.3.6")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -84,7 +84,8 @@ namespace Oxide.Plugins
             LockedVehiclesImmortal = 1uL << 43,
             TurretsIgnoreBradley = 1uL << 44,
             AuthorizedFarmableDamage = 1uL << 45,
-            HopperCannotTargetEnemyLoot = 1uL << 46
+            HopperCannotTargetEnemyLoot = 1uL << 46,
+            VehiclesTakeCollisionDamage = 1uL << 47,
         }
 
         private bool IsUnloading;
@@ -351,11 +352,24 @@ namespace Oxide.Plugins
             {
                 Subscribe(nameof(CanLootEntity));
             }
+            else if (config.options.Loot.Sleepers)
+            {
+                Subscribe(nameof(CanLootEntity));
+            }
+            else if (config.options.Loot.Corpses)
+            {
+                Subscribe(nameof(CanLootEntity));
+            }
+            else if (config.options.Loot.Backpacks)
+            {
+                Subscribe(nameof(CanLootEntity));
+            }
             Subscribe(nameof(OnEntitySpawned));
             Subscribe(nameof(OnMlrsFire));
             BuildPrefabIds();
             AllowLocksOnContainers();
             RemoveTemporaryZones();
+            InitDeepSea();
         }
 
         private IEnumerator OvenCo()
@@ -1113,12 +1127,12 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("siege")
             {
-                members = "SiegeTower, Catapult, Ballista, BallistaGun, BatteringRam, ConstructableEntity"
+                members = "SiegeTower, Catapult, Ballista, Cannon, BallistaGun, BatteringRam, ConstructableEntity"
             });
 
             config.groups.Add(new("bees")
             {
-                members = "BeeSwarmAI, Beehive, BeeGrenade, BeeSwarmMaster, NaturalBeehive"
+                members = "BeeSwarmAI, Beehive, BeeSwarmMaster, NaturalBeehive"
             });
 
             config.groups.Add(new("farm")
@@ -1400,6 +1414,7 @@ namespace Oxide.Plugins
             return text;
         }
 
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public DamageResult HandleMetabolismDamage(HitInfo info, BasePlayer victim, DamageType damageType, float damageAmount)
         {
@@ -1413,41 +1428,50 @@ namespace Oxide.Plugins
                 return DamageResult.None;
             }
 
-            float temperature = victim.metabolism.temperature.value;
-            float multiplier;
-            float normalized;
+            float delta = victim.metabolism.timeSinceLastMetabolism;
+            if (delta <= ConVar.Server.metabolismtick)
+            {
+                //delta = damageAmount / (normalized * multiplier);
+                return DamageResult.None;
+            }
 
+            float expected;
+            float temperature = victim.metabolism.temperature.value;
             if (damageType == DamageType.Cold)
             {
-                if (temperature > 1f)
+                if (temperature >= 1f)
                 {
                     return DamageResult.None;
                 }
 
-                multiplier = temperature < -20f ? 1f :
-                             temperature < -10f ? 0.3f : 0.1f;
+                float multiplier = temperature < -20f ? 1f :
+                                   temperature < -10f ? 0.3f : 0.1f;
 
-                normalized = (temperature - 1f) / -51f;
+                float normalized = (temperature - 1f) / -51f;
+                if (normalized < 0f) normalized = 0f;
+                else if (normalized > 1f) normalized = 1f;
+
+                expected = normalized * delta * multiplier;
             }
             else // DamageType.Heat
             {
-                if (temperature < 60f)
+                if (temperature <= 60f)
                 {
                     return DamageResult.None;
                 }
 
-                multiplier = 5f;
-                normalized = (temperature - 60f) / 140f;
+                float normalized = (temperature - 60f) / 140f;
+                if (normalized < 0f) normalized = 0f;
+                else if (normalized > 1f) normalized = 1f;
+
+                expected = normalized * delta * 5f;
             }
 
-            normalized = normalized < 0f ? 0f : (normalized > 1f ? 1f : normalized);
-
-            float threshold = normalized * ConVar.Player.serverTickInterval * multiplier;
-
-            if (damageAmount > threshold)
-            {
-                return DamageResult.None;
-            }
+            float tolerance = expected * 0.0005f; 
+            if (tolerance < 0.0005f) tolerance = 0.0005f;
+            float diff = damageAmount - expected; 
+            if (diff < 0f) diff = -diff;
+            if (diff > tolerance) return DamageResult.None;
 
             bool option = damageType == DamageType.Cold ? config.options.Cold : config.options.Heat;
             DamageResult damageResult = option ? DamageResult.Allow : DamageResult.Block;
@@ -1636,6 +1660,12 @@ namespace Oxide.Plugins
                 return true;
             }
 
+            if (config.laptop && info.HitBone == 242862488 && info.HitEntity is HackableLockedCrate) // laptopcollision
+            {
+                info.HitBone = 0;
+                return false;
+            }
+
             if (config.options.ArmorDamage.Enabled && isAttacker && !isAtkId && isVicId)
             {
                 HandleHitArea(victim, info);
@@ -1654,9 +1684,9 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            if (config.igniter && entity.OwnerID != 0 && entity is Igniter)
+            if (entity.OwnerID != 0 && entity is Igniter)
             {
-                info.damageTypes.Clear();
+                if (config.igniter) info.damageTypes.Clear();
                 return true;
             }
 
@@ -1710,7 +1740,7 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            if (damageAmount < 15f && HandleMetabolismDamage(info, victim, damageType, damageAmount) != DamageResult.None)
+            if (damageAmount < 15f && !isAttacker && HandleMetabolismDamage(info, victim, damageType, damageAmount) != DamageResult.None)
             {
                 return true;
             }
@@ -1927,7 +1957,13 @@ namespace Oxide.Plugins
 
             if ((_flags & RuleFlags.VehiclesTakeCollisionDamageWithoutDriver) != 0 && entity is BaseVehicle vehicle && weapon == vehicle && !vehicle.GetDriver())
             {
-                if (trace) Trace($"Vehicle collision: No driver; allow and return", 1);
+                if (trace) Trace($"VehiclesTakeCollisionDamageWithoutDriver; allow and return", 1);
+                return true;
+            }
+
+            if ((_flags & RuleFlags.VehiclesTakeCollisionDamage) != 0 && entity is BaseVehicle vehicle2 && weapon == vehicle2)
+            {
+                if (trace) Trace($"VehiclesTakeCollisionDamage: allow and return", 1);
                 return true;
             }
 
@@ -2214,7 +2250,7 @@ namespace Oxide.Plugins
                 else if ((_flags & RuleFlags.AuthorizedFarmableDamage) != 0 && isAtkId && entity is FarmableAnimal)
                 {
                     var parent = entity.GetParentEntity() as ChickenCoop;
-                    bool isAllowed = parent == null || parent.OwnerID == 0 || IsAlly(parent.OwnerID, attacker.userID);
+                    bool isAllowed = parent == null || parent.OwnerID == 0 || IsAlly(parent.OwnerID, attacker.userID) || ((_flags & RuleFlags.CupboardOwnership) != 0 && CheckCupboardOwnership(parent, attacker));
                     if (trace) Trace($"Initiator is player {(isAllowed ? "with farm authorization; allow and return" : "without farm authorization; block and return")}", 1);
                     return isAllowed;
                 }
@@ -2692,6 +2728,12 @@ namespace Oxide.Plugins
             return false;
         }
 
+        private float GetAboveworld() => config.options.Aboveworld;
+        private float GetUnderworld() => config.options.Underworld;
+        private float GetAboveworldOther() => config.options.AboveworldOther;
+        private float GetUnderworldOther() => config.options.UnderworldOther;
+        private bool GetDeepSea() => config.options.DeepSea;
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool PlayerHasExclusion(BasePlayer player, PooledList<string> locs)
         {
@@ -2699,8 +2741,13 @@ namespace Oxide.Plugins
             {
                 return true;
             }
-            if ((config.options.Aboveworld < 5000f && player.transform.position.y >= config.options.Aboveworld) ||
-                (config.options.Underworld > -500f && player.transform.position.y <= config.options.Underworld))
+            Vector3 worldPos = player.transform.position;
+            if ((config.options.Aboveworld < 5000f && worldPos.y >= config.options.Aboveworld) ||
+                (config.options.Underworld > -500f && worldPos.y <= config.options.Underworld))
+            {
+                return true;
+            }
+            if (config.options.DeepSea && worldPos.x >= deepSeaMinX && worldPos.x <= deepSeaMaxX && worldPos.y >= deepSeaMinY && worldPos.y <= deepSeaMaxY && worldPos.z >= deepSeaMinZ && worldPos.z <= deepSeaMaxZ)
             {
                 return true;
             }
@@ -2717,6 +2764,22 @@ namespace Oxide.Plugins
             return false;
         }
 
+        private float deepSeaMinX, deepSeaMaxX, deepSeaMinY, deepSeaMaxY, deepSeaMinZ, deepSeaMaxZ;
+
+        private void InitDeepSea()
+        {
+            var b = DeepSeaManager.DeepSeaBounds;
+            var min = b.center - b.extents;
+            var max = b.center + b.extents;
+            
+            deepSeaMinX = min.x; 
+            deepSeaMaxX = max.x;
+            deepSeaMinY = min.y; 
+            deepSeaMaxY = max.y;
+            deepSeaMinZ = min.z; 
+            deepSeaMaxZ = max.z;
+        }
+
         private bool PlayerHasExclusion(BasePlayer player) => 
             player != null && !player.IsDestroyed && PlayerHasExclusion(player, player.transform.position);
 
@@ -2729,6 +2792,10 @@ namespace Oxide.Plugins
             }
             if ((config.options.Aboveworld < 5000f && worldPos.y >= config.options.Aboveworld) ||
                 (config.options.Underworld > -500f && worldPos.y <= config.options.Underworld))
+            {
+                return true;
+            }
+            if (config.options.DeepSea && worldPos.x >= deepSeaMinX && worldPos.x <= deepSeaMaxX && worldPos.y >= deepSeaMinY && worldPos.y <= deepSeaMaxY && worldPos.z >= deepSeaMinZ && worldPos.z <= deepSeaMaxZ)
             {
                 return true;
             }
@@ -2838,12 +2905,22 @@ namespace Oxide.Plugins
                 return entity.OwnerID == 0 && !entity.InSafeZone() || IsAlly(entity.OwnerID, player.userID); // allow damage to entities that the player owns or is an ally of
             }
 
+            return CheckCupboardOwnership(entity, player);
+        }
+
+        private bool CheckCupboardOwnership(BaseEntity entity, BasePlayer player)
+        {
             // treat entities outside of cupboard range as unowned, and entities inside cupboard range require authorization
             if (entity is LegacyShelter || entity is LegacyShelterDoor)
             {
                 var entityPriv = entity.GetEntityBuildingPrivilege();
 
                 return entityPriv == null || entityPriv.AnyAuthed() && entityPriv.IsAuthed(player);
+            }
+
+            if (entity is PlayerBoat playerBoat)
+            {
+                return playerBoat.IsPlayerAuthed(player, false);
             }
 
             if (entity is ResourceEntity)
@@ -2949,7 +3026,7 @@ namespace Oxide.Plugins
 
             if (ruleSet == null)
             {
-                if (trace) Trace($"CanMlrsTargetLocation allowed {mlrs.TrueHitPos} to be targetted by {player.displayName}; no ruleset found.", 1);
+                if (trace) Trace($"OnMlrsFire allowed {mlrs.TrueHitPos} to be targetted by {player.displayName}; no ruleset found.", 1);
                 return null;
             }
 
@@ -3007,6 +3084,52 @@ namespace Oxide.Plugins
             }
         }
 #endif
+
+        #region Loot
+
+        private bool canBypass(BasePlayer looter) => looter.isInvisible || looter.limitNetworking;
+
+        private object isPlayerProtected(BasePlayer looter, BaseEntity target, ulong? ownerID, bool f)
+        {
+            if (!f || !ownerID.HasValue || ownerID == 0 || looter == null || target == null) return null;
+            if (canBypass(looter)) return null;
+            if (useZones)
+            {
+                using var looterLocations = GetLocationKeys(looter);
+                using var targetLocations = GetLocationKeys(target);
+
+                // check for exclusion zones (zones with no rules mapped)
+                if (CheckExclusion(looterLocations, targetLocations, trace))
+                {
+                    return null;
+                }
+            }
+            return IsAlly(looter.userID, ownerID.Value) ? null : (object)true;
+        }
+
+        private object CanLootPlayer(BasePlayer target, BasePlayer looter) => isPlayerProtected(looter, target, target?.userID, config.options.Loot.Sleepers) != null ? (object)false : null;
+
+        private object CanLootEntity(BasePlayer looter, LootableCorpse corpse) => isPlayerProtected(looter, corpse, corpse?.playerSteamID, config.options.Loot.Corpses);
+
+        private object CanLootEntity(BasePlayer looter, DroppedItemContainer container) => isPlayerProtected(looter, container, container?.playerSteamID, config.options.Loot.Backpacks);
+
+        private object CanLootEntity(BasePlayer player, BuildingPrivlidge priv) => OnCupboardAuthorize(priv, player);
+
+        private object CanLootEntity(BasePlayer player, ModularCarGarage carLift)
+        {
+            if (player == null || carLift == null || carLift.OwnerID == player.userID)
+                return null;
+
+            if (carLift.carOccupant != null && carLift.carOccupant.HasSlot(BaseEntity.Slot.Lock))
+                return null;
+
+            if (carLift.OwnerID.IsSteamId() && !IsAlly(carLift.OwnerID, player.userID))
+                return true;
+
+            return null;
+        }
+
+        #endregion Loot
 
         #region Locks etc
 
@@ -3336,24 +3459,6 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private object CanLootEntity(BasePlayer player, BuildingPrivlidge priv)
-        {
-            return OnCupboardAuthorize(priv, player);
-        }
-
-        private object CanLootEntity(BasePlayer player, ModularCarGarage carLift)
-        {
-            if (player == null || carLift == null || carLift.OwnerID == player.userID)
-                return null;
-
-            if (carLift.carOccupant != null && carLift.carOccupant.HasSlot(BaseEntity.Slot.Lock))
-                return null;
-
-            if (carLift.OwnerID.IsSteamId() && !IsAlly(carLift.OwnerID, player.userID))
-                return true;
-
-            return null;
-        }
 
         #endregion Locks
 
@@ -4401,6 +4506,9 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Prevent Players From Being Marked Hostile")]
             public bool disableHostility;
 
+            [JsonProperty(PropertyName = "Allow PVP Damage In Deep Sea")]
+            public bool DeepSea;
+
             [JsonProperty(PropertyName = "Allow PVP Below Height")]
             public float Underworld = -500f;
 
@@ -4454,6 +4562,15 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Prevent players from using enemy car lifts")]
             public bool Lifts;
+
+            [JsonProperty(PropertyName = "Prevent non-ally from looting sleepers")]
+            public bool Sleepers;
+
+            [JsonProperty(PropertyName = "Prevent non-ally from looting corpses")]
+            public bool Corpses;
+
+            [JsonProperty(PropertyName = "Prevent non-ally from looting backpacks")]
+            public bool Backpacks;
         }
 
         private class ArmorDamagePVE
@@ -4745,6 +4862,9 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Players Can Hurt Turrets In Monument Topology")]
             public bool PlayersHurtTurrets;
 
+            [JsonProperty(PropertyName = "Prevent hackable crate timer from resetting when attacked")]
+            public bool laptop = true;
+
             [JsonProperty(PropertyName = "Block Scrap Heli Damage")]
             public bool scrap = true;
 
@@ -4782,7 +4902,7 @@ namespace Oxide.Plugins
             {
                 this.instance = instance;
                 schedule.Init(instance);
-                foreach (RuleSet rs in ruleSets)
+                foreach (RuleSet rs in ruleSets) 
                     rs.Build(instance);
                 ruleSets.Remove(null);
             }
@@ -4968,7 +5088,10 @@ namespace Oxide.Plugins
             public void Build(TruePVE instance)
             {
                 foreach (string ruleText in rules)
-                    parsedRules.Add(new(instance, ruleText));
+                {
+                    try { parsedRules.Add(new(instance, ruleText)); }
+                    catch { Puts("Invalid rule: {0}", ruleText); }
+                }
                 parsedRules.Remove(null);
                 ValidateRules();
                 InitializeRuleDictionary();
