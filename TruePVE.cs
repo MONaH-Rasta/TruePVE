@@ -16,37 +16,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-/*
-https://umod.org/community/true-pve/58204-patrol-heli-ignores-sleepers-but-ch47-does-not?page=1#post-2
-
-armor doesn't break? Marsdon discord
-
-Requires Rust update to compile
-
-Added several new options for the Apartment Complex monument with PVP blocked in combat zones, and break in blocked for apartment rooms and rental shops by default. Set "Enabled" to false if you do not want to use any of these new options.
-
-Fixed issues with the TwigDamage flag options and included descriptions for each in the documentation
-Fixed `Prevent hackable crate timer from resetting when attacked`
-Added command `finditemprefab` (Example: finditemprefab barricade.wood.cover) to find the entity shortname for an item shortname.
-Added `Allow Raiding In Deep Sea` (false) to include looting containers, can still be blocked by other plugins. Does not enable PVP, enable both options for that. 
-Added additional functionality to `Allow PVP Damage In Deep Sea` to allow looting players, corpses and backpacks, as well as allowing traps and turrets to target and kill players. You must enable the raiding option for raiding to be allowed. Other plugins can block this behavior.
-Added `Use Clans` (true) - several features depend on the functionality of these options to determine if a player is an ally of another player.
-Added `Use Friends` (true)
-Added `Use Teams` (true)
-Added `ExcludePlayerBoatFromImmortalFlags` flag (boat station will not be included until a performance friendly implementation is possible)
-Added support for player-made boats to several existing options
-Added flag `TrapsUnprotected` where traps and turrets are unprotected by AuthorizedDamage flags
-Added `Vehicles can hurt NPC players (true = ignore this option)` and stopped applying vehicle rules to mounted players which prevented players from hurting npcs by hitting them with a vehicle
-Reimplemented `Allow Killing Sleepers (TC Auth Only)` with new options
-Implemented workaround when game doesn't assign a `creatorPlayer` for bee grenades, bee catapult bombs, and supply signals when dropped or catapulted
-Update `Allow Killing Sleepers (TC Auth Only)` to support player-made boats
-Rename `Require Owner Online` to `Block Damage When Owner Is Online` retroactively for clarity
-Rename "Apply To Twig" retroactively
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.8")]
+    [Info("TruePVE", "nivex", "2.3.9")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -2925,7 +2897,7 @@ namespace Oxide.Plugins
 
         private bool IsAlly(BasePlayer a, BasePlayer b)
         {
-            if (config.options.Clans && a.clanId == b.clanId) return true;
+            if (config.options.Clans && a.serverClan != null && a.clanId != 0 && a.clanId == b.clanId) return true;
             return IsAlly(a.userID, b.userID);
         }
 
