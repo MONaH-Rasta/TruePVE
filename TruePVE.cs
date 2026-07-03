@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.3.9")]
+    [Info("TruePVE", "nivex", "2.4.0")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -181,6 +181,7 @@ namespace Oxide.Plugins
             IsUnloading = true;
             scheduleUpdateTimer?.Destroy();
             SaveData();
+            StopUpdateLastSeenCo();
         }
 
         private void OnPluginLoaded(Plugin plugin)
@@ -221,10 +222,11 @@ namespace Oxide.Plugins
 
         private void Init()
         {
-            if (config.AllowKillingSleepersHoursOffline <= 0f)
+            if (!_canKillOfflinePlayerEnabled)
             {
-                Unsubscribe(nameof(OnPlayerSleep));
+                Unsubscribe(nameof(OnPlayerDisconnected));
                 Unsubscribe(nameof(OnPlayerSleepEnded));
+                Unsubscribe(nameof(OnPlayerSleep));
             }
             if (!config.laptop)
             {
@@ -317,7 +319,7 @@ namespace Oxide.Plugins
         private bool IsAnimalsIgnoringSleepers() => animalsIgnoreSleepers || config.ruleSets.Exists(ruleSet => ruleSet.HasFlag(RuleFlags.AnimalsIgnoreSleepers));
         
         private bool IsAnimalsIgnoringSleepers(RuleSet ruleSet) => animalsIgnoreSleepers || ruleSet.HasFlag(RuleFlags.AnimalsIgnoreSleepers);
-        
+
         private void OnServerInitialized(bool isStartup)
         {
             isServerStartingUp = false;
@@ -369,7 +371,7 @@ namespace Oxide.Plugins
             }
             if (config.options.disableBaseOvenSplash)
             {
-                ServerMgr.Instance.StartCoroutine(OvenCo());
+                ServerMgr.Instance.StartCoroutine(OvenOrLockCo());
             }
             if (config.options.disableHostility)
             {
@@ -417,19 +419,28 @@ namespace Oxide.Plugins
             InitDeepSea();
         }
 
-        private IEnumerator OvenCo()
+        private IEnumerator OvenOrLockCo()
         {
             int checks = 0;
+            YieldInstruction instruction = CoroutineEx.waitForSeconds(0.05f);
             foreach (var ent in BaseNetworkable.serverEntities)
             {
-                if (++checks > 500)
+                if (++checks >= 200)
                 {
                     checks = 0;
-                    yield return null;
+                    yield return instruction;
                 }
-                if (ent is BaseOven oven)
+                if (IsUnloading)
+                {
+                    yield break;
+                }
+                if (config.options.disableBaseOvenSplash && ent is BaseOven oven)
                 {
                     oven.disabledBySplash = false;
+                }
+                if (config.options.Loot.Locks && ent is StorageContainer c && c != null && !c.isLockable)
+                {
+                    OnEntitySpawned(c);
                 }
             }
         }
@@ -472,14 +483,14 @@ namespace Oxide.Plugins
             data.LastSeen ??= new();
             if (data.LastRunTime != DateTime.MinValue && DateTime.Now.Subtract(data.LastRunTime).TotalHours >= 24)
             {
-                if (config.AllowKillingSleepersHoursOffline > 0f && data.LastSeen.Count > 0)
+                if (_canKillOfflinePlayerEnabled && data.LastSeen.Count > 0)
                 {
                     Puts("Last seen data wiped due to plugin not being loaded for {0} day(s).", DateTime.Now.Subtract(data.LastRunTime).Days);
                 }
                 data = new();
                 data.LastRunTime = DateTime.Now;
             }
-            if (config.AllowKillingSleepersHoursOffline <= 0f)
+            if (!_canKillOfflinePlayerEnabled)
             {
                 if (data.LastSeen.Count > 0)
                 {
@@ -487,7 +498,22 @@ namespace Oxide.Plugins
                     SaveData();
                 }
             }
-            UpdateLastSeen();
+            else
+            {
+                _updateLastSeenCo = UpdateLastSeenCo();
+                ServerMgr.Instance.StartCoroutine(_updateLastSeenCo);
+            }
+        }
+
+        private IEnumerator _updateLastSeenCo;
+
+        public void StopUpdateLastSeenCo()
+        {
+            if (_updateLastSeenCo != null)
+            {
+                ServerMgr.Instance.StopCoroutine(_updateLastSeenCo);
+                _updateLastSeenCo = null;
+            }
         }
 
         private void SaveData()
@@ -496,43 +522,55 @@ namespace Oxide.Plugins
             Interface.Oxide.DataFileSystem.WriteObject(Name, data);
         }
 
-        public void UpdateLastSeen()
+        public IEnumerator UpdateLastSeenCo()
         {
-            bool changed = false;
-            foreach (var sleeper in BasePlayer.sleepingPlayerList)
+            while (!IsUnloading)
             {
-                if (sleeper == null || !sleeper.userID.IsSteamId())
+                int checks = 0;
+                bool changed = false;
+                foreach (var sleeper in BasePlayer.sleepingPlayerList)
                 {
-                    continue;
+                    if (++checks % 10 == 0)
+                    {
+                        yield return null;
+                    }
+                    if (sleeper == null || !sleeper.userID.IsSteamId())
+                    {
+                        continue;
+                    }
+                    if (data.LastSeen.ContainsKey(sleeper.userID))
+                    {
+                        continue;
+                    }
+                    if (!IsOfflinePlayerProtected(sleeper))
+                    {
+                        data.LastSeen[sleeper.userID] = Epoch.Current;
+                        changed = true;
+                    }
+                    yield return CoroutineEx.waitForSeconds(0.075f);
                 }
-                if (!data.LastSeen.ContainsKey(sleeper.userID) && !sleeper.IsBuildingAuthed(true))
+                foreach (var player in BasePlayer.activePlayerList)
                 {
-                    data.LastSeen[sleeper.userID] = Epoch.Current;
-                    changed = true;
+                    if (++checks % 10 == 0)
+                    {
+                        yield return null;
+                    }
+                    if (data.LastSeen.Remove(player.userID))
+                    {
+                        changed = true;
+                    }
                 }
-            }
-            foreach (var player in BasePlayer.activePlayerList)
-            {
-                if (data.LastSeen.Remove(player.userID))
+                if (changed)
                 {
-                    changed = true;
+                    SaveData();
                 }
-            }
-            if (changed)
-            {
-                SaveData();
+                yield return CoroutineEx.waitForSeconds(60f);
             }
         }
 
         private void OnPlayerSleep(BasePlayer player)
         {
-            if (player == null)
-                return;
-            if (player.IsConnected)
-            {
-                data.LastSeen.Remove(player.userID);
-            }
-            else if (!player.IsBuildingAuthed(true))
+            if (player != null && !IsOfflinePlayerProtected(player))
             {
                 data.LastSeen[player.userID] = Epoch.Current;
             }
@@ -546,27 +584,70 @@ namespace Oxide.Plugins
             }
         }
 
-        public bool CanKillOfflinePlayer(BasePlayer player, out double timeLeft)
+        private void OnPlayerDisconnected(BasePlayer player)
+        {
+            if (player != null && !IsOfflinePlayerProtected(player))
+            {
+                data.LastSeen[player.userID] = Epoch.Current;
+            }
+        }
+
+        public bool CanKillOfflinePlayer(BasePlayer victim, out double timeLeft)
         {
             timeLeft = 0;
-            if (player.IsConnected || !player.IsSleeping())
+            if (victim.IsConnected || !victim.IsSleeping())
             {
-                data.LastSeen.Remove(player.userID);
+                data.LastSeen.Remove(victim.userID);
                 return false;
             }
-            if (!data.LastSeen.TryGetValue(player.userID, out var lastSeen))
+            if (!data.LastSeen.TryGetValue(victim.userID, out var lastSeen))
             {
                 return false;
             }
-            if (player.IsBuildingAuthed(true))
+            if (IsOfflinePlayerProtected(victim))
             {
-                data.LastSeen.Remove(player.userID);
+                data.LastSeen.Remove(victim.userID);
                 return false;
             }
             double timeOffline = Epoch.Current - lastSeen;
             double allowedOfflineTime = config.AllowKillingSleepersHoursOffline * 3600.0;
-            timeLeft = (allowedOfflineTime - timeOffline) / 3600.0;
+            timeLeft = Math.Max(0, allowedOfflineTime - timeOffline);
             return timeOffline > allowedOfflineTime;
+        }
+
+        private bool IsOfflinePlayerProtected(BasePlayer victim)
+        {
+            TriggerSafeZoneOverride t = victim.FindActiveCombatTrigger();
+
+            if (t?.Apartment?.owners != null)
+            {
+                if (t.Apartment.owners.Contains(victim.userID))
+                {
+                    return true;
+                }
+
+                foreach (var owner in t.Apartment.owners)
+                {
+                    if (IsAlly(victim, owner))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            BaseEntity priv = victim.GetVehicleBuildingPrivilege(true) ?? victim.GetBuildingPrivilege(true);
+            if (priv == null)
+            {
+                return false;
+            }
+
+            return priv switch
+            {
+                BoatBuildingStation bbs => bbs.CanPlayerBuild(victim),
+                VehiclePrivilege vp => vp.IsAuthed(victim),
+                BuildingPrivlidge bp => bp.IsAuthed(victim),
+                _ => false
+            };
         }
 
         #endregion Data
@@ -2168,16 +2249,15 @@ namespace Oxide.Plugins
                     victim.lastAdminCheatTime = UnityEngine.Time.realtimeSinceStartup + 1.9f;
                 }
 
-                double hoursLeft = 0;
+                double secondsLeft = 0;
 
                 if (isAtkId && isVicId)
                 {
-                    if (_canKillOfflinePlayerEnabled && CanKillOfflinePlayer(victim, out hoursLeft))
+                    if (_canKillOfflinePlayerEnabled && CanKillOfflinePlayer(victim, out secondsLeft))
                     {
                         if (trace) Trace($"Initiator ({attacker}) and target ({victim} exceeds Allow Killing Sleepers offline time); allow and return", 1);
                         return true;
                     }
-
                     if (!useZones)
                     {
                         if (PlayerHasExclusion(attacker, info.PointStart) && PlayerHasExclusion(victim, info.HitPositionWorld))
@@ -2200,14 +2280,15 @@ namespace Oxide.Plugins
                     return true;
                 }
 
-                if (isAtkId && hoursLeft > 0 && damageType != DamageType.Heat)
+                if (isAtkId && secondsLeft > 0 && damageType != DamageType.Heat)
                 {
                     ulong userid = attacker.userID;
                     if (!_waiting.Contains(userid))
                     {
-                        timer.Once(1f, () => _waiting.Remove(userid));
-                        Message(attacker, "Error_TimeLeft", Math.Round(hoursLeft, 2));
                         _waiting.Add(userid);
+                        timer.Once(1f, () => _waiting.Remove(userid));
+                        TimeSpan t = TimeSpan.FromSeconds(secondsLeft);
+                        Message(attacker, "Error_OfflineTimeLeft", t.TotalHours >= 1 ? $"{(int)t.TotalHours}h {t.Minutes}m {t.Seconds}s" : t.TotalMinutes >= 1 ? $"{t.Minutes}m {t.Seconds}s" : $"{t.Seconds}s");
                     }
                 }
             }
@@ -3463,11 +3544,15 @@ namespace Oxide.Plugins
             {
                 if (Interface.CallHook("CanPurchaseMasterKey", nas, player, conversationFor, responseNode) is true) return null;
                 Message(player, "Error_MasterKeyDisabled");
+                nas.ForceEndConversation(player);
                 return false;
             }
-            if (actionString == "PaidDoor")
+            if (actionString == "PaidDoor" && !config.options.Apartments.Bribe)
             {
-
+                if (Interface.CallHook("CanBribeSecurityGuard", nas, player, conversationFor, responseNode) is true) return null;
+                Message(player, "Error_BribeDisabled");
+                nas.ForceEndConversation(player);
+                return false;
             }
             return null;
         }
@@ -3565,35 +3650,13 @@ namespace Oxide.Plugins
 
         private void AllowLocksOnContainers()
         {
-            if (config.options.Loot.Locks)
+            if (config.options.Loot.Locks && !config.options.disableBaseOvenSplash)
             {
-                ServerMgr.Instance.StartCoroutine(LockCo());
+                ServerMgr.Instance.StartCoroutine(OvenOrLockCo());
             }
             if (config.options.Loot.Antigrief)
             {
                 Subscribe(nameof(OnCodeEntered));
-            }
-        }
-
-        private IEnumerator LockCo()
-        {
-            int checks = 0;
-            YieldInstruction instruction = CoroutineEx.waitForSeconds(0.05f);
-            foreach (var ent in BaseNetworkable.serverEntities)
-            {
-                if (++checks >= 200)
-                {
-                    checks = 0;
-                    yield return instruction;
-                }
-                if (IsUnloading)
-                {
-                    yield break;
-                }
-                if (ent is StorageContainer c && c != null && !c.isLockable)
-                {
-                    OnEntitySpawned(c);
-                }
             }
         }
 
@@ -3607,7 +3670,7 @@ namespace Oxide.Plugins
                 entity.SetSlot(BaseEntity.Slot.Lock, keyLock);
                 keyLock.OwnerID = userid;
                 keyLock.firstKeyCreated = true;
-                keyLock.SetFlag(BaseEntity.Flags.Locked, true);
+                keyLock.SetFlagLocal(BaseEntity.Flags.Locked, true);
             }
         }
 
@@ -3627,7 +3690,7 @@ namespace Oxide.Plugins
                 codeLock.guestPlayers.Clear();
                 codeLock.whitelistPlayers.Clear();
                 codeLock.whitelistPlayers.Add(userid);
-                codeLock.SetFlag(BaseEntity.Flags.Locked, true);
+                codeLock.SetFlagLocal(BaseEntity.Flags.Locked, true);
             }
         }
 
@@ -5147,8 +5210,8 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Allow Master Key")]
             public bool MasterKey;
 
-            [JsonProperty(PropertyName = "Allow Basement Terminal Bribe")]
-            public bool Bribe = true;
+            [JsonProperty(PropertyName = "Allow Bribe In Basement")]
+            public bool Bribe;
 
             [JsonProperty(PropertyName = "Allow Break In (Rental Shop)")]
             public bool Shop;
@@ -6070,9 +6133,10 @@ namespace Oxide.Plugins
                 {"Format_ErrorColor", "#FF0000"}, // red
                 {"Format_ErrorSize", "12"},
 
-                {"Error_TimeLeft", "You must wait another {0} hours to attack this player."},
+                {"Error_OfflineTimeLeft", "You must wait another {0} to attack this player."},
                 {"Error_CannotAccessEntity", "You are not allowed to access this" },
                 {"Error_MasterKeyDisabled", "Apartment master keys are disabled." },
+                {"Error_BribeDisabled", "Bribing the security guard is disabled." },
             }, this);
         }
 
