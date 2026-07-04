@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.0")]
+    [Info("TruePVE", "nivex", "2.4.1")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -166,17 +166,13 @@ namespace Oxide.Plugins
 		
         private void Unload()
         {
-            bool save = false;
-            if (_removeMappingTimer is { Destroyed: false })
+            if (_removeMappingTimerDat is { Destroyed: false })
             {
-                _removeMappingTimer.Destroy();
-                SaveConfig();
-                save = true;
+                _removeMappingTimerDat.Destroy();
             }
-            if (_auMappingTimer is { Destroyed: false })
+            if (_auMappingTimerDat is { Destroyed: false })
             {
-                _auMappingTimer.Destroy();
-                if (!save) SaveConfig();
+                _auMappingTimerDat.Destroy();
             }
             IsUnloading = true;
             scheduleUpdateTimer?.Destroy();
@@ -211,13 +207,22 @@ namespace Oxide.Plugins
         protected void SetUseZones()
         {
             useZones = config != null && config.mappings != null && config.options != null && config.options.useZones && (LiteZones != null || ZoneManager != null);
+            bool onlyDefault = true;
             if (useZones && config.mappings.Count == 1)
             {
                 foreach (var mapping in config.mappings)
                 {
-                    useZones = !mapping.Key.Equals(config.defaultRuleSet);
+                    if (!mapping.Key.Equals(config.defaultRuleSet)) onlyDefault = false;
                 }
             }
+            if (useZones && onlyDefault && data.mappings.Count == 1)
+            {
+                foreach (var mapping in data.mappings)
+                {
+                    if (!mapping.Key.Equals(config.defaultRuleSet)) onlyDefault = false;
+                }
+            }
+            if (useZones && onlyDefault) useZones = false;
         }
 
         private void Init()
@@ -415,8 +420,13 @@ namespace Oxide.Plugins
             Subscribe(nameof(OnMlrsFire));
             BuildPrefabIds();
             AllowLocksOnContainers();
-            RemoveTemporaryZones();
+            if (config.options.AutoRemove) RemoveTemporaryZones();
             InitDeepSea();
+            if (_canKillOfflinePlayerEnabled)
+            {
+                _updateLastSeenCo = UpdateLastSeenCo();
+                ServerMgr.Instance.StartCoroutine(_updateLastSeenCo);
+            }
         }
 
         private IEnumerator OvenOrLockCo()
@@ -470,8 +480,13 @@ namespace Oxide.Plugins
 
         private class StoredData
         {
+            public Dictionary<string, string> mappings = new();
             public Dictionary<ulong, int> LastSeen = new();
             public DateTime LastRunTime = DateTime.MinValue;
+            public bool HasMapping(string key)
+            {
+                return mappings.ContainsKey(key) || mappings.ContainsKey(AllZones);
+            }
         }
 
         private StoredData data = new();
@@ -481,6 +496,7 @@ namespace Oxide.Plugins
             try { data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name); } catch (Exception ex) { Puts(ex.ToString()); }
             data ??= new();
             data.LastSeen ??= new();
+            data.mappings ??= new();
             if (data.LastRunTime != DateTime.MinValue && DateTime.Now.Subtract(data.LastRunTime).TotalHours >= 24)
             {
                 if (_canKillOfflinePlayerEnabled && data.LastSeen.Count > 0)
@@ -490,18 +506,10 @@ namespace Oxide.Plugins
                 data = new();
                 data.LastRunTime = DateTime.Now;
             }
-            if (!_canKillOfflinePlayerEnabled)
+            if (!_canKillOfflinePlayerEnabled && data.LastSeen.Count > 0)
             {
-                if (data.LastSeen.Count > 0)
-                {
-                    data.LastSeen.Clear();
-                    SaveData();
-                }
-            }
-            else
-            {
-                _updateLastSeenCo = UpdateLastSeenCo();
-                ServerMgr.Instance.StartCoroutine(_updateLastSeenCo);
+                data.LastSeen.Clear();
+                SaveData();
             }
         }
 
@@ -615,24 +623,55 @@ namespace Oxide.Plugins
             return timeOffline > allowedOfflineTime;
         }
 
-        private bool IsOfflinePlayerProtected(BasePlayer victim)
+        private readonly List<ApartmentRoom> _rooms = new();
+        private bool TryGetApartmentRoom(BasePlayer player, out ApartmentRoom room)
         {
-            TriggerSafeZoneOverride t = victim.FindActiveCombatTrigger();
-
-            if (t?.Apartment?.owners != null)
+            room = null;
+            if (player == null || player.IsDestroyed) return false;
+            if (_rooms.Count == 0)
             {
-                if (t.Apartment.owners.Contains(victim.userID))
+                foreach (var triggerSafeZone in TriggerSafeZone.allSafeZones)
+                {
+                    if (triggerSafeZone?.triggerCollider == null) continue;
+                    if (triggerSafeZone.Apartment?.rooms == null) continue;
+                    _rooms.AddRange(triggerSafeZone.Apartment.rooms);
+                }
+            }
+            foreach (var _room in _rooms)
+            {
+                if (_room == null || _room.IsDestroyed || _room.owners == null) continue;
+                if (!_room.IsCurrentlyRented() || !_room.IsInsideRoom(player)) continue;
+                room = _room;
+                return true;
+            }
+            return false;
+        }
+
+        private bool IsInsideApartmentRoom(BasePlayer player)
+        {
+            if (!TryGetApartmentRoom(player, out var room))
+            {
+                return false;
+            }
+            if (room.owners.Contains(player.userID))
+            {
+                return true;
+            }
+            foreach (var owner in room.owners)
+            {
+                if (IsAlly(player, owner))
                 {
                     return true;
                 }
+            }
+            return false;
+        }
 
-                foreach (var owner in t.Apartment.owners)
-                {
-                    if (IsAlly(victim, owner))
-                    {
-                        return true;
-                    }
-                }
+        private bool IsOfflinePlayerProtected(BasePlayer victim)
+        {
+            if (IsInsideApartmentRoom(victim))
+            {
+                return true;
             }
 
             BaseEntity priv = victim.GetVehicleBuildingPrivilege(true) ?? victim.GetBuildingPrivilege(true);
@@ -789,6 +828,8 @@ namespace Oxide.Plugins
             config.options = new();
             Message(user, "Notify_DefConfigLoad");
             LoadDefaultData();
+            data.mappings ??= new();
+            data.mappings.Clear();
             Message(user, "Notify_DefDataLoad");
             CheckData();
             SaveConfig();
@@ -863,18 +904,32 @@ namespace Oxide.Plugins
                     return;
                 }
 
+                bool changes = false;
                 if (config.mappings.TryGetValue(from, out string old))
                 {
+                    changes = true;
                     Message(user, "Notify_MappingUpdated", from, old, to);
-                }
-                else
-                {
-                    Message(user, "Notify_MappingCreated", from, to);
+                    config.mappings[from] = to;
+                    SaveConfig();
+                    TryBuildExclusionMappings();
                 }
 
-                config.mappings[from] = to;
-                SaveConfig();
-                TryBuildExclusionMappings();
+                if (data.mappings.TryGetValue(from, out old))
+                {
+                    changes = true;
+                    Message(user, "Notify_MappingUpdated", from, old, to);
+                    data.mappings[from] = to;
+                    SaveData();
+                    TryBuildExclusionMappings();
+                }
+
+                if (!changes) // this is a command so default to config
+                {
+                    Message(user, "Notify_MappingCreated", from, to);
+                    config.mappings[from] = to;
+                    SaveConfig();
+                    TryBuildExclusionMappings();
+                }
             }
             else
             {
@@ -882,6 +937,12 @@ namespace Oxide.Plugins
                 {
                     Message(user, "Notify_MappingDeleted", from, config.mappings.TryGetValue(from, out var old) ? old : AllZones);
                     if (config.mappings.Remove(from)) SaveConfig();
+                    TryBuildExclusionMappings();
+                }
+                else if (data.HasMapping(from))
+                {
+                    Message(user, "Notify_MappingDeleted", from, data.mappings.TryGetValue(from, out var old) ? old : AllZones);
+                    if (data.mappings.Remove(from)) SaveData();
                     TryBuildExclusionMappings();
                 }
                 else
@@ -1012,7 +1073,6 @@ namespace Oxide.Plugins
             }
             TryUpdateConfig();
             config.configVersion = Version.ToString();
-            CheckMappings();
             BuildRuleSetDictionary();
             BuildExclusionMappings();
             _allowKillingSleepersEnabled = config.AllowKillingSleepersAlly || config.AllowKillingSleepers || config.EntityCountRequired || config.AllowKillingSleepersIds.Exists(x => x.IsSteamId());
@@ -1126,21 +1186,6 @@ namespace Oxide.Plugins
             return false;
         }
 
-        // rebuild mappings
-        private bool CheckMappings()
-        {
-            bool dirty = false;
-            foreach (RuleSet ruleSet in config.ruleSets)
-            {
-                if (!config.mappings.ContainsValue(ruleSet.name))
-                {
-                    config.mappings[ruleSet.name] = ruleSet.name;
-                    dirty = true;
-                }
-            }
-            return dirty;
-        }
-
         protected void BuildRuleSetDictionary()
         {
             ruleSetByNameDictionary.Clear();
@@ -1160,6 +1205,10 @@ namespace Oxide.Plugins
             {
                 BuildExclusionMappings();
             }
+            else if (!data.mappings.TryGetValue(AllZones, out val) || !val.Equals("exclude", StringComparison.OrdinalIgnoreCase))
+            {
+                BuildExclusionMappings();
+            }
         }
 
         protected void BuildExclusionMappings()
@@ -1167,13 +1216,22 @@ namespace Oxide.Plugins
             excludeAllZones = false;
             exclusionLocationsSet.Clear();
 
-            if (config.mappings.TryGetValue(AllZones, out var val) && val.Equals("exclude", StringComparison.OrdinalIgnoreCase))
+            using var mappings = Pool.Get<PooledList<KeyValuePair<string, string>>>();
+            mappings.AddRange(config.mappings);
+            mappings.AddRange(data.mappings);
+
+            for (int i = mappings.Count - 1; i >= 0; i--)
             {
-                excludeAllZones = true;
-                return;
+                var (key, value) = mappings[i];
+
+                if (key == AllZones && string.Equals(value, "exclude", StringComparison.OrdinalIgnoreCase))
+                {
+                    excludeAllZones = true;
+                    return;
+                }
             }
 
-            foreach (var (key, value) in config.mappings)
+            foreach (var (key, value) in mappings)
             {
                 if (!value.Equals("exclude", StringComparison.OrdinalIgnoreCase))
                 {
@@ -2183,7 +2241,12 @@ namespace Oxide.Plugins
                     {
                         if (attacker.userID == victim.userID) return selfDamageFlag;
                         if (config.options.Apartments.Alive && !attacker.IsAlive()) return false;
-                        if (attacker.HasPlayerFlag(BasePlayer.PlayerFlags.CombatZone)) return config.options.Apartments.PVP;
+                        if (attacker.HasPlayerFlag(BasePlayer.PlayerFlags.CombatZone))
+                        {
+                            if (!config.options.Apartments.PVP) return false;
+                            if (!config.options.Apartments.SameRoom) return true;
+                            return TryGetApartmentRoom(attacker, out var room) && room.IsInsideRoom(victim);
+                        }
                     }
 
                     if (_pvpReflectionEnabled && victim.userID != attacker.userID)
@@ -2993,6 +3056,10 @@ namespace Oxide.Plugins
                         return true;
                     }
                 }
+                if (a.serverClan.Creator == b)
+                {
+                    return true;
+                }
             }
             return IsAlly(a.userID, b);
         }
@@ -3123,6 +3190,54 @@ namespace Oxide.Plugins
         private bool GetDeepSeaPVP() => config.options.DeepSeaPVP;
         private bool GetDeepSeaRaiding() => config.options.DeepSeaRaiding;
         private bool GetDeepSea() => config.options.DeepSeaPVP && config.options.DeepSeaRaiding;
+        private bool GetApartmentEnabled() => config.options.Apartments.Enabled;
+        private bool GetApartmentPVP() => GetApartmentEnabled() && config.options.Apartments.PVP;
+        private bool GetApartmentPVPAlive() => GetApartmentEnabled() && GetApartmentPVP() && config.options.Apartments.Alive;
+        private bool GetApartmentMasterKeyBlocked() => GetApartmentEnabled() && config.options.Apartments.MasterKey;
+        private bool GetApartmentBribesBlocked() => GetApartmentEnabled() && config.options.Apartments.Bribe;
+        private bool GetApartmentRentalShopBreakInBlocked() => GetApartmentEnabled() && config.options.Apartments.Shop;
+        private bool GetApartmentRoomBreakInBlocked() => GetApartmentEnabled() && config.options.Apartments.Room;
+
+        private bool GetWorldNoAlloc(Dictionary<string, object> dict)
+        {
+            if (dict == null) return false;
+            dict["world_above"] = GetAboveworld();
+            dict["world_under"] = GetUnderworld();
+            dict["world_aboveother"] = GetAboveworldOther();
+            dict["world_underother"] = GetUnderworldOther();
+            return true;
+        }
+
+        private bool GetDeepSeaNoAlloc(Dictionary<string, object> dict)
+        {
+            if (dict == null) return false;
+            dict["deepsea_pvp"] = GetDeepSeaPVP();
+            dict["deepsea_raiding"] = GetDeepSeaRaiding();
+            dict["deepsea_pvpraiding"] = GetDeepSea();
+            return true;
+        }
+
+        private bool GetApartmentsNoAlloc(Dictionary<string, object> dict)
+        {
+            if (dict == null) return false;
+            dict["apartment_enabled"] = GetApartmentEnabled();
+            dict["apartment_pvp"] = GetApartmentPVP();
+            dict["apartment_alive"] = GetApartmentPVPAlive();
+            dict["apartment_masterkey"] = GetApartmentMasterKeyBlocked();
+            dict["apartment_bribes"] = GetApartmentBribesBlocked();
+            dict["apartment_rentalshopbreakin"] = GetApartmentRentalShopBreakInBlocked();
+            dict["apartment_apartmentroombreakin"] = GetApartmentRoomBreakInBlocked();
+            return true;
+        }
+
+        private bool GetOptionsNoAlloc(Dictionary<string, object> dict)
+        {
+            if (dict == null) return false;
+            GetWorldNoAlloc(dict);
+            GetDeepSeaNoAlloc(dict);
+            GetApartmentsNoAlloc(dict);
+            return true;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool PlayerHasExclusion(BasePlayer player, PooledList<string> locs)
@@ -3146,6 +3261,10 @@ namespace Oxide.Plugins
                 foreach (var loc in locs)
                 {
                     if (config.mappings.TryGetValue(loc, out var mapping) && mapping == "exclude")
+                    {
+                        return true;
+                    }
+                    if (data.mappings.TryGetValue(loc, out mapping) && mapping == "exclude")
                     {
                         return true;
                     }
@@ -3205,6 +3324,10 @@ namespace Oxide.Plugins
                         {
                             return true;
                         }
+                        if (data.mappings.TryGetValue(loc, out mapping) && mapping == "exclude")
+                        {
+                            return true;
+                        }
                     }
                 }
             }
@@ -3230,14 +3353,21 @@ namespace Oxide.Plugins
                         {
                             return locMapping;
                         }
+                        if (data.mappings.TryGetValue(loc, out locMapping))
+                        {
+                            return locMapping;
+                        }
                     }
                 }
             }
             else ruleSet = currentRuleSet;
             trace = t;
-            if (ruleSet != null && ruleSet.enabled && !ruleSet.IsEmpty() && config.mappings.TryGetValue(ruleSet.name, out var ruleSetMapping))
+            if (ruleSet != null && ruleSet.enabled && !ruleSet.IsEmpty())
             {
-                return ruleSetMapping;
+                if (config.mappings.TryGetValue(ruleSet.name, out var ruleSetMapping) || data.mappings.TryGetValue(ruleSet.name, out ruleSetMapping))
+                {
+                    return ruleSetMapping;
+                }
             }
             return "default";
         }
@@ -4464,7 +4594,7 @@ namespace Oxide.Plugins
                 using var names = Pool.Get<PooledList<string>>();
                 foreach (var loc in sharedLocations)
                 {
-                    if (config.mappings.TryGetValue(loc, out string mapping))
+                    if (config.mappings.TryGetValue(loc, out string mapping) || data.mappings.TryGetValue(loc, out mapping))
                     {
                         names.Add(mapping);
                     }
@@ -4490,7 +4620,17 @@ namespace Oxide.Plugins
 
                     if (trace)
                     {
-                        Trace($"Found allzones mapped RuleSet", 3);
+                        Trace("Found allzones mapped RuleSet in config", 3);
+                    }
+                }
+
+                if (sets.Count == 0 && data.mappings.TryGetValue(AllZones, out val) && ruleSetByNameDictionary.TryGetValue(val, out all))
+                {
+                    sets.Add(all);
+
+                    if (trace)
+                    {
+                        Trace("Found allzones mapped RuleSet in data file", 3);
                     }
                 }
 
@@ -4548,7 +4688,7 @@ namespace Oxide.Plugins
 
             foreach (string loc in e0Locations)
             {
-                if (e1Locations.Contains(loc) && config.HasMapping(loc))
+                if (e1Locations.Contains(loc) && (config.HasMapping(loc) || data.HasMapping(loc)))
                 {
                     sharedLocations.Add(loc);
                 }
@@ -4602,22 +4742,22 @@ namespace Oxide.Plugins
         }
 
         // add or update a mapping
-        private Timer _auMappingTimer;
+        private Timer _auMappingTimerDat;
         private bool AddOrUpdateMapping(string key, string ruleset)
         {
-            if (string.IsNullOrEmpty(key) || config == null || ruleset == null || (ruleset != "exclude" && !config.ruleSets.Exists(r => r.name == ruleset)))
+            if (string.IsNullOrEmpty(key) || config == null || data == null || data.mappings == null || ruleset == null || (ruleset != "exclude" && !config.ruleSets.Exists(r => r.name == ruleset)))
             {
                 return false;
             }
 
-            config.mappings[key] = ruleset;
+            data.mappings[key] = ruleset;
             TryBuildExclusionMappings();
             SetUseZones();
-            
-            if (_auMappingTimer is { Destroyed: false }) _auMappingTimer.Reset();
-            else _auMappingTimer = timer.Once(1f, () =>
+
+            if (_auMappingTimerDat is { Destroyed: false }) _auMappingTimerDat.Reset();
+            else _auMappingTimerDat = timer.Once(1f, () =>
             {
-                SaveConfig();
+                SaveData();
                 SetExposedMappings();
                 Interface.CallHook("OnUpdatedMappings", _mappings);
             });
@@ -4626,15 +4766,16 @@ namespace Oxide.Plugins
         }
 
         // remove a mapping
-        private Timer _removeMappingTimer;
+        private Timer _removeMappingTimerDat;
         private bool RemoveMapping(string key)
         {
-            if (!string.IsNullOrEmpty(key) && config.mappings.Remove(key))
+            if (string.IsNullOrEmpty(key)) return false;
+            if (data.mappings.Remove(key))
             {
-                if (_removeMappingTimer is { Destroyed: false }) _removeMappingTimer.Reset();
-                else _removeMappingTimer = timer.Once(1f, () =>
+                if (_removeMappingTimerDat is { Destroyed: false }) _removeMappingTimerDat.Reset();
+                else _removeMappingTimerDat = timer.Once(1f, () =>
                 {
-                    SaveConfig();
+                    SaveData();
                     SetExposedMappings();
                     Interface.CallHook("OnRemovedMappings", _mappings);
                 });
@@ -4644,7 +4785,6 @@ namespace Oxide.Plugins
             return false;
         }
 
-        // remove a list of mappings, optionally add removed mappings to results
         private bool RemoveMappings(List<string> keys, List<string> results = null)
         {
             bool ret = false;
@@ -4665,6 +4805,10 @@ namespace Oxide.Plugins
         // get all mappings
         private void GetMappingsDictionaryNoAlloc(Dictionary<string, string> dict)
         {
+            foreach (var pair in data.mappings)
+            {
+                dict[pair.Key] = pair.Value;
+            }
             foreach (var pair in config.mappings)
             {
                 dict[pair.Key] = pair.Value;
@@ -4673,7 +4817,14 @@ namespace Oxide.Plugins
 
         private void GetMappingsListNoAlloc(List<string> list)
         {
-            list.AddRange(config.mappings.Keys);
+            foreach (var key in config.mappings.Keys)
+            {
+                if (!list.Contains(key)) list.Add(key);
+            }
+            foreach (var key in data.mappings.Keys)
+            {
+                if (!list.Contains(key)) list.Add(key);
+            }
         }
 
         #endregion
@@ -5059,7 +5210,7 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Allow Thirst And Hunger Damage To Farmable Animals")]
             public bool FarmableMetabolism = true;
 
-            [JsonProperty(PropertyName = "Auto remove mappings that no longer exist on server restart")]
+            [JsonProperty(PropertyName = "Auto remove mappings from data file that no longer exist on server restart")]
             public bool AutoRemove;
 
             [JsonProperty(PropertyName = "Vehicles can hurt NPC players (true = ignore this option)")]
@@ -5206,6 +5357,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "PVP Requires Attacker To Be Alive")]
             public bool Alive = true;
+
+            [JsonProperty(PropertyName = "PVP Requires Attacker In The Same Room")]
+            public bool SameRoom = true;
 
             [JsonProperty(PropertyName = "Allow Master Key")]
             public bool MasterKey;
@@ -6078,7 +6232,7 @@ namespace Oxide.Plugins
             }
         }
 
-#endregion
+        #endregion
 
         #region Lang
         // load default messages to Lang
