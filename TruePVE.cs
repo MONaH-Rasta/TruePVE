@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.1")]
+    [Info("TruePVE", "nivex", "2.4.2")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -207,22 +207,29 @@ namespace Oxide.Plugins
         protected void SetUseZones()
         {
             useZones = config != null && config.mappings != null && config.options != null && config.options.useZones && (LiteZones != null || ZoneManager != null);
-            bool onlyDefault = true;
-            if (useZones && config.mappings.Count == 1)
+
+            if (!useZones)
             {
-                foreach (var mapping in config.mappings)
+                return;
+            }
+
+            foreach (var mapping in config.mappings)
+            {
+                if (!mapping.Key.Equals(config.defaultRuleSet))
                 {
-                    if (!mapping.Key.Equals(config.defaultRuleSet)) onlyDefault = false;
+                    return;
                 }
             }
-            if (useZones && onlyDefault && data.mappings.Count == 1)
+
+            foreach (var mapping in data.mappings)
             {
-                foreach (var mapping in data.mappings)
+                if (!mapping.Key.Equals(config.defaultRuleSet))
                 {
-                    if (!mapping.Key.Equals(config.defaultRuleSet)) onlyDefault = false;
+                    return;
                 }
             }
-            if (useZones && onlyDefault) useZones = false;
+
+            useZones = false;
         }
 
         private void Init()
@@ -867,7 +874,7 @@ namespace Oxide.Plugins
                 Message(user, "Error_InvalidCommand");
                 return;
             }
-
+            
             string from;
             string to;
 
