@@ -9,6 +9,7 @@ using Rust.Ai.Gen2;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -18,7 +19,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.2")]
+    [Info("TruePVE", "nivex", "2.4.3")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -131,7 +132,7 @@ namespace Oxide.Plugins
         private uint rocket_heli = 129320027;
 
         private bool excludeAllZones;
-        private readonly List<ulong> _waiting = new();
+        private readonly Dictionary<ulong, double> _waiting = new();
         private readonly HashSet<string> _deployables = new();
         private readonly HashSet<string> exclusionLocationsSet = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<ulong, List<PlayerExclusion>> playerDelayExclusions = new();
@@ -260,6 +261,9 @@ namespace Oxide.Plugins
             {
                 Unsubscribe(nameof(OnSprayCreate));
             }
+            Unsubscribe(nameof(CanTakeCutting));
+            Unsubscribe(nameof(OnGrowableGather));
+            Unsubscribe(nameof(OnConstructionPlace));
             Unsubscribe(nameof(CanLootEntity));
             Unsubscribe(nameof(OnCodeEntered));
             Unsubscribe(nameof(CanChangeCode));
@@ -281,6 +285,8 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnVendingTransaction));
             Unsubscribe(nameof(OnRentableShopBreakInComplete));
             Unsubscribe(nameof(OnApartmentRoomBreakInComplete));
+            Unsubscribe(nameof(CanAffordApartmentMasterKey));
+            Unsubscribe(nameof(OnApartmentMasterKeyPurchase));
             // register console commands automagically
             foreach (Command command in Enum.GetValues(typeof(Command)))
             {
@@ -400,6 +406,12 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnWallpaperRemove));
                 Subscribe(nameof(OnTimedExplosiveExplode));
             }
+            if (config.options.Loot.Planters)
+            {
+                Subscribe(nameof(CanTakeCutting));
+                Subscribe(nameof(OnGrowableGather));
+                Subscribe(nameof(OnConstructionPlace));
+            }
             if (config.options.Loot.ProtectTC)
             {
                 Subscribe(nameof(OnCupboardAuthorize));
@@ -410,18 +422,26 @@ namespace Oxide.Plugins
             {
                 Subscribe(nameof(CanLootEntity));
             }
-            if (config.options.Apartments.Enabled && !config.options.Apartments.MasterKey)
+            if (config.options.Apartments.Enabled)
             {
-                Subscribe(nameof(OnNpcConversationRespond));
-                Subscribe(nameof(OnVendingTransaction));
-            }
-            if (config.options.Apartments.Enabled && !config.options.Apartments.Shop)
-            {
-                Subscribe(nameof(OnRentableShopBreakInComplete));
-            }
-            if (config.options.Apartments.Enabled && !config.options.Apartments.Room)
-            {
-                Subscribe(nameof(OnApartmentRoomBreakInComplete));
+                if (!config.options.Apartments.Bribe)
+                {
+                    Subscribe(nameof(OnNpcConversationRespond));
+                }
+                if (!config.options.Apartments.MasterKey)
+                {
+                    Subscribe(nameof(OnVendingTransaction));
+                    Subscribe(nameof(CanAffordApartmentMasterKey));
+                    Subscribe(nameof(OnApartmentMasterKeyPurchase));
+                }
+                if (!config.options.Apartments.Shop)
+                {
+                    Subscribe(nameof(OnRentableShopBreakInComplete));
+                }
+                if (!config.options.Apartments.Room)
+                {
+                    Subscribe(nameof(OnApartmentRoomBreakInComplete));
+                }
             }
             Subscribe(nameof(OnEntitySpawned));
             Subscribe(nameof(OnMlrsFire));
@@ -436,16 +456,19 @@ namespace Oxide.Plugins
             }
         }
 
+        private long GetFrameDeadline(double milliseconds = 1) => Stopwatch.GetTimestamp() + (long)Math.Ceiling(milliseconds * stopwatchTicksPerMillisecond);
+        private readonly double stopwatchTicksPerMillisecond = Stopwatch.Frequency / 1000d;
+
         private IEnumerator OvenOrLockCo()
         {
-            int checks = 0;
-            YieldInstruction instruction = CoroutineEx.waitForSeconds(0.05f);
+            //long start = Stopwatch.GetTimestamp();
+            long deadline = GetFrameDeadline();
             foreach (var ent in BaseNetworkable.serverEntities)
             {
-                if (++checks >= 200)
+                if (Stopwatch.GetTimestamp() >= deadline)
                 {
-                    checks = 0;
-                    yield return instruction;
+                    yield return null;
+                    deadline = GetFrameDeadline();
                 }
                 if (IsUnloading)
                 {
@@ -460,6 +483,7 @@ namespace Oxide.Plugins
                     OnEntitySpawned(c);
                 }
             }
+            //Puts("Took {0:0.##}ms to process ovens and locks.", (Stopwatch.GetTimestamp() - start) / stopwatchTicksPerMillisecond);
         }
 
         private void BuildPrefabIds()
@@ -539,15 +563,18 @@ namespace Oxide.Plugins
 
         public IEnumerator UpdateLastSeenCo()
         {
+            var instruction1 = CoroutineEx.waitForSeconds(0.075f);
+            var instruction2 = CoroutineEx.waitForSeconds(60f);
             while (!IsUnloading)
             {
-                int checks = 0;
+                long deadline = GetFrameDeadline();
                 bool changed = false;
                 foreach (var sleeper in BasePlayer.sleepingPlayerList)
                 {
-                    if (++checks % 10 == 0)
+                    if (Stopwatch.GetTimestamp() >= deadline)
                     {
                         yield return null;
+                        deadline = GetFrameDeadline();
                     }
                     if (sleeper == null || !sleeper.userID.IsSteamId())
                     {
@@ -562,13 +589,15 @@ namespace Oxide.Plugins
                         data.LastSeen[sleeper.userID] = Epoch.Current;
                         changed = true;
                     }
-                    yield return CoroutineEx.waitForSeconds(0.075f);
+                    yield return instruction1;
+                    deadline = GetFrameDeadline();
                 }
                 foreach (var player in BasePlayer.activePlayerList)
                 {
-                    if (++checks % 10 == 0)
+                    if (Stopwatch.GetTimestamp() >= deadline)
                     {
                         yield return null;
+                        deadline = GetFrameDeadline();
                     }
                     if (data.LastSeen.Remove(player.userID))
                     {
@@ -579,7 +608,8 @@ namespace Oxide.Plugins
                 {
                     SaveData();
                 }
-                yield return CoroutineEx.waitForSeconds(60f);
+                yield return instruction2;
+                deadline = GetFrameDeadline();
             }
         }
 
@@ -2116,14 +2146,23 @@ namespace Oxide.Plugins
             {
                 if (victim != null && weapon is ScrapTransportHelicopter)
                 {
+                    victim.Teleport(weapon.transform.position + new Vector3(0f, 2.5f, 0f));
                     info.damageTypes.Clear();
                     return true;
                 }
                 if (weapon is BasePlayer driver && (driver.GetMountedVehicle() is ScrapTransportHelicopter || info.WeaponPrefab is ScrapTransportHelicopter))
                 {
+                    victim.Teleport(weapon.transform.position + new Vector3(0f, 2.5f, 0f)); 
                     info.damageTypes.Clear();
                     return true;
                 }
+            }
+
+            if (victim != null && weapon is ElevatorLift)
+            {
+                victim.Teleport(weapon.transform.position + new Vector3(0f, 0.5f, 0f));
+                info.damageTypes.Clear();
+                return true;
             }
 
             // allow damage to door barricades and covers 
@@ -2314,9 +2353,10 @@ namespace Oxide.Plugins
 
             if (isVictim)
             {
-                if (config.PreventRagdolling && isVicId && damageType == DamageType.Collision)
+                if (config.PreventRagdolling && isVicId && damageType == DamageType.Collision && victim.ActivePlayerInd != -1)
                 {
-                    victim.lastAdminCheatTime = UnityEngine.Time.realtimeSinceStartup + 1.9f;
+                    ref AntiHack.PlayerState playerState = ref ((Span<AntiHack.PlayerState>)AntiHack.PlayerStates)[victim.ActivePlayerInd];
+                    playerState.LastAdminCheatTime = UnityEngine.Time.realtimeSinceStartup - 1.9f;
                 }
 
                 double secondsLeft = 0;
@@ -2353,10 +2393,13 @@ namespace Oxide.Plugins
                 if (isAtkId && secondsLeft > 0 && damageType != DamageType.Heat)
                 {
                     ulong userid = attacker.userID;
-                    if (!_waiting.Contains(userid))
+                    double now = Time.timeAsDouble;
+
+                    if (_waiting.Count > 10) _waiting.Clear();
+
+                    if (!_waiting.TryGetValue(userid, out var time) || time <= now)
                     {
-                        _waiting.Add(userid);
-                        timer.Once(1f, () => _waiting.Remove(userid));
+                        _waiting[userid] = now + 1;
                         TimeSpan t = TimeSpan.FromSeconds(secondsLeft);
                         Message(attacker, "Error_OfflineTimeLeft", t.TotalHours >= 1 ? $"{(int)t.TotalHours}h {t.Minutes}m {t.Seconds}s" : t.TotalMinutes >= 1 ? $"{t.Minutes}m {t.Seconds}s" : $"{t.Seconds}s");
                     }
@@ -3667,9 +3710,9 @@ namespace Oxide.Plugins
         {
             if (vm == null || vm.IsDestroyed || sellOrderId < 0 || sellOrderId >= vm.sellOrders.sellOrders.Count) return null;
             var sellOrder = vm.sellOrders.sellOrders[sellOrderId];
-            var key = ApartmentDoor.MasterKeyDef;
+            var key = ItemManager.Items.MasterKey;
             if (key == null || key.itemid != sellOrder.itemToSellID) return null;
-            if (Interface.CallHook("CanPurchaseMasterKey", vm, buyer, sellOrderId, numberOfTransactions, targetContainer) is true) return null;
+            if (Interface.CallHook("CanPurchaseMasterKey", buyer, vm, sellOrderId, numberOfTransactions, targetContainer) is true) return null;
             if (buyer != null) Message(buyer, "Error_MasterKeyDisabled");
             return false;
         }
@@ -3677,16 +3720,16 @@ namespace Oxide.Plugins
         private object OnNpcConversationRespond(NPCApartmentSecurity nas, BasePlayer player, ConversationData conversationFor, ConversationData.ResponseNode responseNode)
         {
             string actionString = responseNode.GetActionString();
-            if (actionString == "PaidKey" && !config.options.Apartments.MasterKey)
-            {
-                if (Interface.CallHook("CanPurchaseMasterKey", nas, player, conversationFor, responseNode) is true) return null;
-                Message(player, "Error_MasterKeyDisabled");
-                nas.ForceEndConversation(player);
-                return false;
-            }
+            //if (actionString == "PaidKey" && !config.options.Apartments.MasterKey)
+            //{
+            //    if (Interface.CallHook("CanPurchaseMasterKey", player, nas, conversationFor, responseNode) is true) return null;
+            //    Message(player, "Error_MasterKeyDisabled");
+            //    nas.ForceEndConversation(player);
+            //    return false;
+            //}
             if (actionString == "PaidDoor" && !config.options.Apartments.Bribe)
             {
-                if (Interface.CallHook("CanBribeSecurityGuard", nas, player, conversationFor, responseNode) is true) return null;
+                if (Interface.CallHook("CanBribeSecurityGuard", player, nas, conversationFor, responseNode) is true) return null;
                 Message(player, "Error_BribeDisabled");
                 nas.ForceEndConversation(player);
                 return false;
@@ -3694,17 +3737,52 @@ namespace Oxide.Plugins
             return null;
         }
 
+        private object CanAffordApartmentMasterKey(BasePlayer player) // can replace OnNpcConversationRespond for MasterKey option but not Bribe.
+        {
+            if (!config.options.Apartments.MasterKey)
+            {
+                if (Interface.CallHook("CanPurchaseMasterKey", player) is true) return null;
+                Message(player, "Error_MasterKeyDisabled");
+                return false;
+            }
+            return null;
+        }
+
+        private object OnApartmentMasterKeyPurchase(BasePlayer player) => CanAffordApartmentMasterKey(player) != null ? (object)true : null; // called from basement
+
         private object OnRentableShopBreakInComplete(RentableShop shop, BasePlayer player)
         {
-            if (Interface.CallHook("CanPlayerCompleteBreakIn", shop, player) is true) return null;
+            if (Interface.CallHook("CanPlayerCompleteBreakIn", player, shop) is true) return null;
             Message(player, "Error_MasterKeyDisabled");
             return true;
         }
 
         private object OnApartmentRoomBreakInComplete(ApartmentRoom apt, BasePlayer player, ApartmentDoor door)
         {
-            if (Interface.CallHook("CanPlayerCompleteBreakIn", apt, player, door) is true) return null;
+            if (Interface.CallHook("CanPlayerCompleteBreakIn", player, door, apt) is true) return null;
             Message(player, "Error_MasterKeyDisabled");
+            return true;
+        }
+
+        private object CanTakeCutting(BasePlayer player, GrowableEntity plant) => CanHarvest(player, plant, nameof(CanTakeCutting));
+
+        private object OnGrowableGather(GrowableEntity plant, BasePlayer player, bool eat) => CanHarvest(player, plant, nameof(OnGrowableGather));
+
+        private object OnConstructionPlace(GrowableEntity plant, Construction component, Construction.Target placement, BasePlayer ownerPlayer) => CanHarvest(ownerPlayer, plant, nameof(OnConstructionPlace), placement.entity);
+
+        private object CanHarvest(BasePlayer looter, GrowableEntity plant, string caller, BaseEntity parent = null)
+        {
+            if (!config.options.Loot.Planters) return null;
+            if (looter == null || plant == null) return null;
+
+            var planter = plant.GetPlanter() ?? parent as PlanterBox;
+            if (planter == null) return null;
+            if (!planter.OwnerID.IsSteamId()) return null;
+
+            BuildingPrivlidge priv = planter.GetBuildingPrivilege(true);
+            if (priv != null && priv.IsAuthed(looter)) return null;
+            if (Interface.CallHook("CanUsePlanterBox", looter, planter, plant, caller) is true) return null;
+            Message(looter, "Error_Harvest");
             return true;
         }
 
@@ -5274,6 +5352,9 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Prevent non-ally from looting backpacks")]
             public bool Backpacks;
 
+            [JsonProperty(PropertyName = "Prevent non-ally from looting planters")]
+            public bool Planters;
+
             internal bool Enabled => ProtectTC || Lifts || Sleepers || Corpses || Backpacks;
         }
 
@@ -5455,6 +5536,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Block Scrap Heli Damage")]
             public bool scrap = true;
+
+            [JsonProperty(PropertyName = "Prevent elevator from crushing players by using a short upward teleport")]
+            public bool lift;
 
             [JsonProperty(PropertyName = "Block Igniter Damage")]
             public bool igniter;
@@ -6298,6 +6382,7 @@ namespace Oxide.Plugins
                 {"Error_CannotAccessEntity", "You are not allowed to access this" },
                 {"Error_MasterKeyDisabled", "Apartment master keys are disabled." },
                 {"Error_BribeDisabled", "Bribing the security guard is disabled." },
+                {"Error_Harvest", "You are not allowed to plant or harvest this."},
             }, this);
         }
 
