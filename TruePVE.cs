@@ -15,11 +15,12 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using Unity.Collections;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.4")]
+    [Info("TruePVE", "nivex", "2.4.5")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -90,6 +91,19 @@ namespace Oxide.Plugins
             TrapsUnprotected = 1uL << 49,
         }
 
+        [Flags]
+        public enum ProtectionHook : ulong
+        {
+            None = 0,
+            Damage = 1uL << 0,
+            Familiarity = 1uL << 1,
+            Leading = 1uL << 2,
+            Milking = 1uL << 3,
+            RefuseTarget = 1uL << 4,
+            Shearing = 1uL << 5
+        }
+
+        private ProtectionHook protectionHooks;
         private bool IsUnloading;
         private Timer scheduleUpdateTimer;                              // timer to check for schedule updates
         private bool shareRedirectDudEnabled;                           // undocumented. UAYOR.
@@ -141,8 +155,8 @@ namespace Oxide.Plugins
         private class PlayerExclusion : Pool.IPooled
         {
             public Plugin plugin;
-            public float time;
-            public bool IsExpired => Time.time > time;
+            public double time;
+            public bool IsExpired => Time.realtimeSinceStartupAsDouble > time;
             public void EnterPool()
             {
                 plugin = null;
@@ -198,7 +212,7 @@ namespace Oxide.Plugins
             if (plugin.Name == "LiteZones")
                 LiteZones = null;
             if (ZoneManager == null && LiteZones == null)
-                useZones = false;
+                SetUseZones();
         }
 
         private void OnCreatedDynamicPVP() => SetUseZones();
@@ -207,30 +221,39 @@ namespace Oxide.Plugins
 
         protected void SetUseZones()
         {
+            if (IsUnloading) return;
+            bool wasUsingZones = useZones;
             useZones = config != null && config.mappings != null && config.options != null && config.options.useZones && (LiteZones != null || ZoneManager != null);
 
-            if (!useZones)
+            if (useZones)
             {
-                return;
-            }
-
-            foreach (var mapping in config.mappings)
-            {
-                if (!mapping.Key.Equals(config.defaultRuleSet))
+                useZones = false;
+                foreach (var mapping in config.mappings)
                 {
-                    return;
+                    if (!mapping.Key.Equals(config.defaultRuleSet))
+                    {
+                        useZones = true;
+                        break;
+                    }
+                }
+
+                if (!useZones)
+                {
+                    foreach (var mapping in data.mappings)
+                    {
+                        if (!mapping.Key.Equals(config.defaultRuleSet))
+                        {
+                            useZones = true;
+                            break;
+                        }
+                    }
                 }
             }
 
-            foreach (var mapping in data.mappings)
+            if (wasUsingZones != useZones && currentRuleSet != null)
             {
-                if (!mapping.Key.Equals(config.defaultRuleSet))
-                {
-                    return;
-                }
+                ValidateProtectionHooks();
             }
-
-            useZones = false;
         }
 
         private void Init()
@@ -261,6 +284,11 @@ namespace Oxide.Plugins
             {
                 Unsubscribe(nameof(OnSprayCreate));
             }
+            Unsubscribe(nameof(OnEntityDistanceCheck));
+            Unsubscribe(nameof(OnEntityVisibilityCheck));
+            Unsubscribe(nameof(OnPlayerAttack));
+            Unsubscribe(nameof(CanLivestockAnimalRefuseTarget));
+            Unsubscribe(nameof(OnLivestockAnimalFamiliarityAdd));
             Unsubscribe(nameof(CanTakeCutting));
             Unsubscribe(nameof(OnGrowableGather));
             Unsubscribe(nameof(OnConstructionPlace));
@@ -331,7 +359,7 @@ namespace Oxide.Plugins
             }
 
             currentRuleSet = rs;
-            ValidateCurrentDamageHook();
+            ValidateProtectionHooks();
             user.Reply($"Active ruleset is now '{name}'.");
         }
 
@@ -417,7 +445,7 @@ namespace Oxide.Plugins
             {
                 Subscribe(nameof(OnEntityMarkHostile));
             }
-            ValidateCurrentDamageHook();
+            ValidateProtectionHooks();
             if (config.wallpaper)
             {
                 Subscribe(nameof(OnWallpaperRemove));
@@ -789,7 +817,7 @@ namespace Oxide.Plugins
                 currentRuleSet.rules.Add(allow ? "players can hurt players" : "players cannot hurt players");
                 currentRuleSet.parsedRules.Clear();
                 currentRuleSet.Build(this);
-                ValidateCurrentDamageHook();
+                ValidateProtectionHooks();
                 SaveConfig();
                 Puts("PVP toggled {0}", allow ? "on" : "off");
                 return;
@@ -804,7 +832,7 @@ namespace Oxide.Plugins
             if (command == "tpve_enable")
             {
                 tpveEnabled = !tpveEnabled;
-                ValidateCurrentDamageHook();
+                ValidateProtectionHooks();
                 Message(user, "Enable", IsEnabled());
                 return;
             }
@@ -834,7 +862,7 @@ namespace Oxide.Plugins
                     return;
                 case Command.enable:
                     tpveEnabled = !tpveEnabled;
-                    ValidateCurrentDamageHook();
+                    ValidateProtectionHooks();
                     Message(user, "Enable", IsEnabled());
                     return;
                 case Command.map:
@@ -901,8 +929,10 @@ namespace Oxide.Plugins
             LoadDefaultData();
             data.mappings ??= new();
             data.mappings.Clear();
+            allyLookupTimes.Clear();
             Message(user, "Notify_DefDataLoad");
             CheckData();
+            ValidateProtectionHooks();
             SaveConfig();
         }
 
@@ -916,7 +946,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (!GetRaycastTarget(player, out var entity))
+            if (!GetRaycastTarget(player, out BaseEntity entity))
             {
                 SendReply(player, WrapSize(12, WrapColor("red", GetMessage("Error_NoEntityFound", player.UserIDString))));
                 return;
@@ -1142,6 +1172,7 @@ namespace Oxide.Plugins
                 config.options.BlockHandler.Twig = config.options.BlockHandler._Twig.Value;
                 config.options.BlockHandler._Twig = null;
             }
+            config.options.Livestock ??= new();
             TryUpdateConfig();
             config.configVersion = Version.ToString();
             BuildRuleSetDictionary();
@@ -1161,10 +1192,11 @@ namespace Oxide.Plugins
 
             Dictionary<string, List<string>> updates = new(StringComparer.OrdinalIgnoreCase)
             {
-                ["npcs"] = new() { "SnakeHazard", "ScientistNPC2" },
-                ["dispensers"] = new() { "VineSwingingTree" },
+                ["npcs"] = new() { nameof(SnakeHazard), nameof(ScientistNPC2) },
+                ["dispensers"] = new() { nameof(VineSwingingTree), nameof(LivestockCorpse) },
                 ["traps"] = new() { "spikes.trap" },
                 ["barricades2"] = new() { "barricade.medieval", "barricade.cover.wood", "barricade.cover.wood_double" },
+                ["farm"] = new() { nameof(Sheep), nameof(Cow) },
             };
 
             for (int i = 0; i < config.groups.Count; i++)
@@ -1280,6 +1312,7 @@ namespace Oxide.Plugins
             {
                 BuildExclusionMappings();
             }
+            SetUseZones();
         }
 
         protected void BuildExclusionMappings()
@@ -1377,7 +1410,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("dispensers")
             {
-                members = "BaseCorpse, HelicopterDebris, PlayerCorpse, NPCPlayerCorpse, HorseCorpse, SkyLantern, Pinata"
+                members = "BaseCorpse, HelicopterDebris, PlayerCorpse, NPCPlayerCorpse, HorseCorpse, SkyLantern, Pinata, LivestockCorpse"
             });
 
             config.groups.Add(new("fire")
@@ -1484,7 +1517,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("farm")
             {
-                members = "simplechicken.entity, FarmableAnimal, ChickenCoop"
+                members = "simplechicken.entity, FarmableAnimal, ChickenCoop, Sheep, Cow"
             });
         }
 
@@ -1594,7 +1627,7 @@ namespace Oxide.Plugins
                 currentRuleSet = config.GetDefaultRuleSet();
             }
 
-            ValidateCurrentDamageHook();
+            ValidateProtectionHooks();
             return currentRuleSet != null;
         }
         #endregion
@@ -2148,8 +2181,9 @@ namespace Oxide.Plugins
             }
 
             var damageAmount = info.damageTypes.Total();
-
-            if (damageAmount <= 0f)
+            LivestockAnimal livestock = entity as LivestockAnimal;
+            bool isKeptLivestock = config.options.Livestock.Damage && livestock != null && IsKeptLivestock(livestock);
+            if (!isKeptLivestock && damageAmount <= 0f)
             {
                 return true;
             }
@@ -2170,7 +2204,13 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            if (entity is BaseNpc or BaseNPC2)
+            if (entity is BaseNpc)
+            {
+                if (trace) Trace($"Target is animal; allow and return {weapon} -> {entity}", 1);
+                return true;
+            }
+
+            if (!isKeptLivestock && entity is BaseNPC2 { IsAnimal: true })
             {
                 if (trace) Trace($"Target is animal; allow and return {weapon} -> {entity}", 1);
                 return true;
@@ -2435,7 +2475,7 @@ namespace Oxide.Plugins
                 if (isAtkId && secondsLeft > 0 && damageType != DamageType.Heat)
                 {
                     ulong userid = attacker.userID;
-                    double now = Time.timeAsDouble;
+                    double now = Time.realtimeSinceStartupAsDouble;
 
                     if (_waiting.Count > 10) _waiting.Clear();
 
@@ -2758,6 +2798,12 @@ namespace Oxide.Plugins
                     if (trace) Trace($"Initiator is player {(isAllowed ? "with farm authorization; allow and return" : "without farm authorization; block and return")}", 1);
                     return isAllowed;
                 }
+                else if (isAtkId && isKeptLivestock)
+                {
+                    bool isAllowed = IsLivestockAlly(livestock, attacker, (_flags & RuleFlags.CupboardOwnership) != 0);
+                    if (trace) Trace($"Initiator is player {(isAllowed ? "with livestock authorization; allow and return" : "without livestock authorization; block and return")}", 1);
+                    return isAllowed;
+                }
                 else if ((_flags & RuleFlags.AuthorizedDamage) != 0 && !isVictim && !entity.IsNpc && isAtkId && !(entity is FarmableAnimal) && !((_flags & RuleFlags.TrapsUnprotected) != 0 && entity is AutoTurret or SamSite or GunTrap or FlameTurret or TeslaCoil or BaseTrap))
                 { // ignore checks if authorized damage enabled (except for players and npcs)
                     if ((_flags & RuleFlags.AuthorizedDamageCheckPrivilege) != 0)
@@ -3036,7 +3082,7 @@ namespace Oxide.Plugins
 
         private bool AllowHeliDamage(RuleSet ruleSet, BaseEntity entity, BaseEntity weapon, BasePlayer victim, bool isVicId, bool allow)
         {
-            if (entity is FarmableAnimal or ChickenCoop or Beehive)
+            if ((entity is FarmableAnimal or ChickenCoop or Beehive) || BlockHeliDamageToLivestock(entity))
             {
                 if (trace) Trace($"Initiator is heli, target is {entity.ShortPrefabName}; block and return", 1);
                 return false;
@@ -3129,39 +3175,103 @@ namespace Oxide.Plugins
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool IsOwner(ulong a, ulong b) => a == b;
 
-        private bool IsAlly(BasePlayer a, BasePlayer b)
+        private struct LookupTime
         {
-            if (config.options.Clans && a.serverClan != null && a.clanId != 0 && a.clanId == b.clanId) return true;
-            return IsAlly(a.userID, b.userID);
+            public bool Result;
+            public long ExpiresAt;
+            public LookupTime(bool result, long expiresAt)
+            {
+                Result = result;
+                ExpiresAt = expiresAt;
+            }
         }
 
-        private bool IsAlly(BasePlayer a, ulong b)
+        private long nextAllyLookupCleanTime;
+        private Dictionary<(ulong first, ulong second), LookupTime> allyLookupTimes = new();
+        private bool IsAlly(ulong first, ulong second, long length = 1)
         {
-            if (config.options.Clans && a.serverClan != null)
+            if (IsOwner(first, second))
+                return true;
+
+            if (!config.options.Ally)
+                return false;
+
+            var now = Stopwatch.GetTimestamp();
+            var t = first < second ? (first, second) : (second, first);
+            if (allyLookupTimes.TryGetValue(t, out var lookup) && lookup.ExpiresAt > now) return lookup.Result;
+
+            if (now > nextAllyLookupCleanTime)
             {
-                foreach (var member in a.serverClan.Members)
+                nextAllyLookupCleanTime = now + Stopwatch.Frequency * 30L;
+                using var lookups = Pool.Get<PooledList<(ulong, ulong)>>();
+                foreach (var pair in allyLookupTimes)
+                {
+                    if (now > pair.Value.ExpiresAt)
+                    {
+                        lookups.Add(pair.Key);
+                    }
+                }
+                foreach (var key in lookups)
+                {
+                    allyLookupTimes.Remove(key);
+                }
+            }
+
+            bool result = first switch
+            {
+                _ when config.options.Teams && RelationshipManager.ServerInstance.playerToTeam.TryGetValue(first, out var team) && team.members.Contains(second) => true,
+                _ when config.options.Clans && Clans != null && Clans?.Call("IsClanMember", first, second) is true => true,
+                _ when config.options.Friends && Friends != null && Friends?.Call("AreFriends", first, second) is true => true,
+                _ => false
+            };
+
+            allyLookupTimes[t] = new(result, now + Stopwatch.Frequency * length);
+            return result;
+        }
+
+        public bool IsAlly(BasePlayer a, ulong b)
+        {
+            if (config.options.Clans && a.clanId != 0 && TryGetClan(a, out IClan clan))
+            {
+                if (clan.Creator == b)
+                {
+                    return true;
+                }
+                foreach (var member in clan.Members)
                 {
                     if (member.SteamId == b)
                     {
                         return true;
                     }
                 }
-                if (a.serverClan.Creator == b)
-                {
-                    return true;
-                }
             }
             return IsAlly(a.userID, b);
         }
 
-        private bool IsAlly(ulong vic, ulong atk) => vic switch
+        public bool IsAlly(BasePlayer a, BasePlayer b)
         {
-            _ when IsOwner(vic, atk) => true,
-            _ when config.options.Teams && RelationshipManager.ServerInstance.playerToTeam.TryGetValue(vic, out var team) && team.members.Contains(atk) => true,
-            _ when config.options.Clans && Clans != null && Convert.ToBoolean(Clans?.Call("IsClanMember", vic, atk)) => true,
-            _ when config.options.Friends && Friends != null && Convert.ToBoolean(Friends?.Call("AreFriends", vic, atk)) => true,
-            _ => false
-        };
+            if (config.options.Clans && TryGetClan(a, out IClan clan) && clan.ClanId == b.clanId) return true;
+            return IsAlly(a, b.userID);
+        }
+
+        private static IClan GetClan(BasePlayer player)
+        {
+            if (player.clanId == 0)
+            {
+                return null;
+            }
+            if (player.serverClan == null)
+            {
+                ClanManager.ServerInstance?.Backend?.TryGet(player.clanId, out player.serverClan);
+            }
+            return player.serverClan;
+        }
+
+        private static bool TryGetClan(BasePlayer player, out IClan clan)
+        {
+            clan = GetClan(player);
+            return clan != null;
+        }
 
         private bool CanAuthorize(BaseEntity entity, BasePlayer attacker, RuleSet ruleSet)
         {
@@ -3243,7 +3353,7 @@ namespace Oxide.Plugins
                     exclusions.Add(exclusion);
                 }
                 exclusion.plugin = plugin;
-                exclusion.time = Time.time + maxDelayLength;
+                exclusion.time = Time.realtimeSinceStartupAsDouble + maxDelayLength;
             }
         }
 
@@ -3730,6 +3840,274 @@ namespace Oxide.Plugins
             }
         }
 #endif
+
+        #region Livestock
+
+        private long nextLivestockLookupCleanTime;
+        private Dictionary<(ulong livestockId, ulong userId), LookupTime> livestockLookupTimes = new();
+
+        private bool BlockHeliDamageToLivestock(BaseEntity entity)
+        {
+            return config.options.Livestock.Damage && entity is LivestockAnimal livestock && IsKeptLivestock(livestock);
+        }
+
+        private bool IsKeptLivestock(LivestockAnimal livestock)
+        {
+            return livestock.OwnerID.IsSteamId() || livestock.IsTame || livestock.IsLeading() || livestock.TryGetHomeCupboard(out _);
+        }
+
+        private bool ShouldBlockLivestockInteraction(LivestockAnimal livestock, BasePlayer player, bool useCache = false, long length = 1)
+        {
+            if (!IsEnabled() || canBypass(player) || !IsKeptLivestock(livestock))
+            {
+                return false;
+            }
+
+            useCache &= livestock.net != null;
+
+            long now = 0L;
+            (ulong livestockId, ulong userId) key = default;
+            if (useCache)
+            {
+                now = Stopwatch.GetTimestamp();
+                key = (livestock.net.ID.Value, player.userID);
+
+                if (livestockLookupTimes.TryGetValue(key, out var lookup) && lookup.ExpiresAt > now)
+                {
+                    return lookup.Result;
+                }
+
+                if (now >= nextLivestockLookupCleanTime)
+                {
+                    nextLivestockLookupCleanTime = now + Stopwatch.Frequency * 30L;
+
+                    using var lookups = Pool.Get<PooledList<(ulong, ulong)>>();
+
+                    foreach (var pair in livestockLookupTimes)
+                    {
+                        if (now >= pair.Value.ExpiresAt)
+                        {
+                            lookups.Add(pair.Key);
+                        }
+                    }
+
+                    foreach (var expiredKey in lookups)
+                    {
+                        livestockLookupTimes.Remove(expiredKey);
+                    }
+                }
+            }
+
+            RuleSet ruleSet = currentRuleSet;
+
+            if (useZones)
+            {
+                using var entityLocations = GetLocationKeys(livestock);
+                using var playerLocations = GetLocationKeys(player);
+
+                ruleSet = CheckExclusion(entityLocations, playerLocations, false) ? null : GetRuleSet(entityLocations, playerLocations);
+            }
+
+            bool blocked = ruleSet != null && ruleSet.enabled && !ruleSet.IsEmpty() && !IsLivestockAlly(livestock, player, (ruleSet._flags & RuleFlags.CupboardOwnership) != 0);
+
+            if (useCache)
+            {
+                livestockLookupTimes[key] = new(blocked, now + Stopwatch.Frequency * length);
+            }
+
+            return blocked;
+        }
+
+        private bool IsLivestockAlly(LivestockAnimal livestock, BasePlayer player, bool cupboardOwnership)
+        {
+            if (livestock.acquaintances != null)
+            {
+                foreach (var acquaintance in livestock.acquaintances)
+                {
+                    if (acquaintance.userId.IsSteamId() && acquaintance.seconds >= ConVar.Livestock.trustToBond && IsAlly(player, acquaintance.userId))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            if (livestock.TryGetHomeCupboard(out var home))
+            {
+                return (home.OwnerID.IsSteamId() && IsAlly(player, home.OwnerID)) || (cupboardOwnership && home.IsAuthed(player));
+            }
+
+            if (livestock.OwnerID.IsSteamId())
+            {
+                return IsAlly(player, livestock.OwnerID);
+            }
+
+            if (livestock.IsLeading() && livestock.LeadingPlayer.Get(true).Is(out BasePlayer leader) && IsAlly(player, leader))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        public void CheckLivestockDamageOption()
+        {
+            livestockLookupTimes.Clear();
+
+            var opt = config.options.Livestock;
+
+            opt.Damage = opt.Leading || opt.Milking || opt.Shearing;
+
+            if (opt.Damage)
+            {
+                return;
+            }
+
+            if (useZones && shareRedirectDudEnabled)
+            {
+                opt.Damage = true;
+                return;
+            }
+
+            int ruleSetCount = useZones ? config.ruleSets.Count : 1;
+
+            for (int i = 0; i < ruleSetCount; i++)
+            {
+                RuleSet ruleSet = useZones ? config.ruleSets[i] : currentRuleSet;
+
+                if (ruleSet == null || !ruleSet.enabled || ruleSet.IsEmpty())
+                {
+                    continue;
+                }
+
+                if (!ruleSet.defaultAllowDamage || (ruleSet._flags & (RuleFlags.AuthorizedFarmableDamage | RuleFlags.NoHeliDamage | RuleFlags.NoMLRSDamage)) != 0)
+                {
+                    opt.Damage = true;
+                    return;
+                }
+
+                foreach (var rule in ruleSet.parsedRules)
+                {
+                    if (rule == null || !rule.valid || rule.hurt || string.IsNullOrEmpty(rule.key))
+                    {
+                        continue;
+                    }
+
+                    int index = rule.key.IndexOf("->", StringComparison.Ordinal);
+                    if (index < 0)
+                    {
+                        continue;
+                    }
+
+                    string targetGroupName = rule.key[(index + 2)..];
+                    if (targetGroupName.Equals(Any, StringComparison.OrdinalIgnoreCase))
+                    {
+                        opt.Damage = true;
+                        return;
+                    }
+
+                    foreach (var group in config.groups)
+                    {
+                        if (!group.name.Equals(targetGroupName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        if (group.Contains(nameof(Cow)) || group.Contains(nameof(Sheep)))
+                        {
+                            opt.Damage = true;
+                            return;
+                        }
+
+                        break;
+                    }
+                }
+            }
+        }
+
+        private object OnEntityDistanceCheck(LivestockAnimal livestock, BasePlayer player, uint id, string debugName, float maximumDistance, bool checkParent)
+        {
+            if (!config.options.Livestock.Leading || debugName != "RPC_Lead" || livestock == null || livestock.IsDestroyed || player == null || !player.userID.IsSteamId())
+            {
+                return null;
+            }
+            return livestock.CanStopLead(player) || !ShouldBlockLivestockInteraction(livestock, player) ? null : false;
+        }
+
+        private object OnEntityVisibilityCheck(Cow cow, BasePlayer player, uint id, string debugName, float maximumDistance)
+        {
+            if (!config.options.Livestock.Milking || debugName != "MilkCow" || cow == null || cow.IsDestroyed || player == null || !player.userID.IsSteamId())
+            {
+                return null;
+            }
+
+            return ShouldBlockLivestockInteraction(cow, player) ? false : null;
+        }
+
+        private object OnPlayerAttack(BasePlayer player, HitInfo info)
+        {
+            if (!config.options.Livestock.Shearing || info == null || player == null || !player.userID.IsSteamId() || !info.HitEntity.Is(out Sheep sheep) || sheep.IsDestroyed)
+            {
+                return null;
+            }
+
+            if (info.IsProjectile() || !sheep.IsShearTool(info.Weapon) || !sheep.CanBeSheared(player) || !ShouldBlockLivestockInteraction(sheep, player))
+            {
+                return null;
+            }
+
+            return true;
+        }
+
+        private object OnLivestockAnimalFamiliarityAdd(LivestockAnimal livestock, ulong userId, float seconds, LivestockAnimal.FamiliarityReason reason)
+        {
+            if (!config.options.Livestock.Damage || seconds <= 0f || livestock == null || livestock.IsDestroyed || !userId.IsSteamId())
+            {
+                return null;
+            }
+
+            BasePlayer player = RelationshipManager.FindByID(userId);
+            if (player == null)
+            {
+                return null;
+            }
+
+            return ShouldBlockLivestockInteraction(livestock, player) ? false : null;
+        }
+
+        private object CanLivestockAnimalRefuseTarget(LivestockAnimal livestock, BasePlayer target)
+        {
+            if (!config.options.Livestock.Damage || livestock == null || livestock.IsDestroyed || target == null || !target.userID.IsSteamId())
+            {
+                return null;
+            }
+
+            return ShouldBlockLivestockInteraction(livestock, target, true) ? true : null;
+        }
+
+        [ConsoleCommand("tpve.resetfamiliarity")]
+        private void ccmdResetFamiliarity(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = arg.Player();
+            if (player == null || !player.IsAdmin)
+            {
+                return;
+            }
+
+            if (!GetRaycastTarget(player, out LivestockAnimal livestock) || livestock.acquaintances == null)
+            {
+                player.ConsoleMessage("Look at a cow or sheep.");
+                return;
+            }
+
+            for (int i = 0; i < livestock.acquaintances.Length; i++)
+            {
+                livestock.acquaintances[i].seconds = 0f;
+            }
+
+            player.ConsoleMessage($"Reset {livestock} familiarity for everyone.");
+        }
+
+        #endregion Livestock
 
         #region Loot
 
@@ -5201,9 +5579,9 @@ namespace Oxide.Plugins
         }
 
         // handle raycast from player (for prodding)
-        private bool GetRaycastTarget(BasePlayer player, out BaseEntity closestEntity)
+        private bool GetRaycastTarget<T>(BasePlayer player, out T closestEntity) where T : BaseEntity
         {
-            if (Physics.Raycast(player.eyes.HeadRay(), out var hit, 10f) && hit.GetEntity() is BaseEntity hitEntity)
+            if (Physics.Raycast(player.eyes.HeadRay(), out var hit, 10f) && hit.GetEntity() is T hitEntity)
             {
                 closestEntity = hitEntity;
                 return closestEntity != null;
@@ -5230,7 +5608,7 @@ namespace Oxide.Plugins
                     currentRuleSet = ruleSet;
                 }
 
-                ValidateCurrentDamageHook();
+                ValidateProtectionHooks();
                 if (config.schedule.broadcast && !string.IsNullOrEmpty(currentBroadcastMessage))
                 {
                     Server.Broadcast(currentBroadcastMessage, GetMessage("Prefix"));
@@ -5244,11 +5622,35 @@ namespace Oxide.Plugins
             }
         }
 
-        private void ValidateCurrentDamageHook()
+        private void ValidateProtectionHooks()
         {
-            if (IsEnabled()) Subscribe(nameof(OnEntityTakeDamage));
-            else Unsubscribe(nameof(OnEntityTakeDamage));
+            CheckLivestockDamageOption();
 
+            bool enabled = IsEnabled();
+            var opt = config.options.Livestock;
+
+            UpdateHook(ProtectionHook.Damage, nameof(OnEntityTakeDamage), enabled);
+            UpdateHook(ProtectionHook.RefuseTarget, nameof(CanLivestockAnimalRefuseTarget), enabled && opt.Damage);
+            UpdateHook(ProtectionHook.Familiarity, nameof(OnLivestockAnimalFamiliarityAdd), enabled && opt.Damage);
+            UpdateHook(ProtectionHook.Leading, nameof(OnEntityDistanceCheck), enabled && opt.Leading);
+            UpdateHook(ProtectionHook.Milking, nameof(OnEntityVisibilityCheck), enabled && opt.Milking);
+            UpdateHook(ProtectionHook.Shearing, nameof(OnPlayerAttack), enabled && opt.Shearing);
+
+            void UpdateHook(ProtectionHook flag, string hook, bool required)
+            {
+                bool subscribed = (protectionHooks & flag) != 0;
+                if (required == subscribed) return;
+                if (required)
+                {
+                    Subscribe(hook);
+                    protectionHooks |= flag;
+                }
+                else
+                {
+                    Unsubscribe(hook);
+                    protectionHooks &= ~flag;
+                }
+            }
         }
 
         #endregion
@@ -5327,8 +5729,25 @@ namespace Oxide.Plugins
             }
         }
 
+        private class LivestockOptions
+        {
+            internal bool Damage = true;
+
+            [JsonProperty(PropertyName = "Prevent non-allies from leading")]
+            public bool Leading = true;
+
+            [JsonProperty(PropertyName = "Prevent non-allies from milking")]
+            public bool Milking = true;
+
+            [JsonProperty(PropertyName = "Prevent non-allies from shearing")]
+            public bool Shearing = true;
+        }
+
         private class ConfigurationOptions
         {
+            [JsonProperty(PropertyName = "Livestock")]
+            public LivestockOptions Livestock = new();
+
             [JsonProperty(PropertyName = "Entities with these skin ID's can hurt anything")]
             public List<ulong> SkinExclusions = new();
 
@@ -5412,6 +5831,8 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Use Teams")]
             public bool Teams = true;
+
+            internal bool Ally => Clans || Friends || Teams;
         }
 
         private class LootSupport
@@ -6156,6 +6577,11 @@ namespace Oxide.Plugins
             {
                 if (string.IsNullOrEmpty(value)) return false;
                 return _exclusionSet.Contains(value);
+            }
+
+            public bool Contains(string typeName)
+            {
+                return _memberSet.Contains(typeName) && !_exclusionSet.Contains(typeName);
             }
 
             public bool Contains(string typeName, string prefabName)
