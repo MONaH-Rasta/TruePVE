@@ -20,7 +20,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.5")]
+    [Info("TruePVE", "nivex", "2.4.6")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -3853,7 +3853,7 @@ namespace Oxide.Plugins
 
         private bool IsKeptLivestock(LivestockAnimal livestock)
         {
-            return livestock.OwnerID.IsSteamId() || livestock.IsTame || livestock.IsLeading() || livestock.TryGetHomeCupboard(out _);
+            return livestock.OwnerID.IsSteamId() || livestock.IsLeadable || livestock.IsLeading() || livestock.TryGetHomeCupboard(out _);
         }
 
         private bool ShouldBlockLivestockInteraction(LivestockAnimal livestock, BasePlayer player, bool useCache = false, long length = 1)
@@ -3924,26 +3924,26 @@ namespace Oxide.Plugins
             {
                 foreach (var acquaintance in livestock.acquaintances)
                 {
-                    if (acquaintance.userId.IsSteamId() && acquaintance.seconds >= ConVar.Livestock.trustToBond && IsAlly(player, acquaintance.userId))
+                    if (acquaintance.userId.IsSteamId() && acquaintance.seconds >= ConVar.Livestock.trustToLead && IsAlly(player, acquaintance.userId))
                     {
                         return true;
                     }
                 }
             }
 
-            if (livestock.TryGetHomeCupboard(out var home))
-            {
-                return (home.OwnerID.IsSteamId() && IsAlly(player, home.OwnerID)) || (cupboardOwnership && home.IsAuthed(player));
-            }
-
-            if (livestock.OwnerID.IsSteamId())
-            {
-                return IsAlly(player, livestock.OwnerID);
-            }
-
             if (livestock.IsLeading() && livestock.LeadingPlayer.Get(true).Is(out BasePlayer leader) && IsAlly(player, leader))
             {
                 return true;
+            }
+
+            if (livestock.OwnerID.IsSteamId() && IsAlly(player, livestock.OwnerID))
+            {
+                return true;
+            }
+
+            if (livestock.TryGetHomeCupboard(out var home))
+            {
+                return (home.OwnerID.IsSteamId() && IsAlly(player, home.OwnerID)) || (cupboardOwnership && home.IsAuthed(player));
             }
 
             return false;
