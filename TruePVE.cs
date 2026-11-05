@@ -20,7 +20,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.6")]
+    [Info("TruePVE", "nivex", "2.4.7")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -100,7 +100,8 @@ namespace Oxide.Plugins
             Leading = 1uL << 2,
             Milking = 1uL << 3,
             RefuseTarget = 1uL << 4,
-            Shearing = 1uL << 5
+            Shearing = 1uL << 5,
+            Trough = 1uL << 6,
         }
 
         private ProtectionHook protectionHooks;
@@ -287,6 +288,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnEntityDistanceCheck));
             Unsubscribe(nameof(OnEntityVisibilityCheck));
             Unsubscribe(nameof(OnPlayerAttack));
+            Unsubscribe(nameof(OnLivestockAnimalClaim));
             Unsubscribe(nameof(CanLivestockAnimalRefuseTarget));
             Unsubscribe(nameof(OnLivestockAnimalFamiliarityAdd));
             Unsubscribe(nameof(CanTakeCutting));
@@ -441,7 +443,7 @@ namespace Oxide.Plugins
             {
                 ServerMgr.Instance.StartCoroutine(OvenOrLockCo());
             }
-            if (onEntityMarkHostile = config.options.disableHostility)
+            if (onEntityMarkHostile = (config.options.disablePlayerHostility || config.options.disableNpcHostility))
             {
                 Subscribe(nameof(OnEntityMarkHostile));
             }
@@ -510,19 +512,18 @@ namespace Oxide.Plugins
             }
         }
 
-        private long GetFrameDeadline(double milliseconds = 1) => Stopwatch.GetTimestamp() + (long)Math.Ceiling(milliseconds * stopwatchTicksPerMillisecond);
+        private long GetDeadline(double milliseconds = 1) => Stopwatch.GetTimestamp() + (long)Math.Ceiling(milliseconds * stopwatchTicksPerMillisecond);
         private readonly double stopwatchTicksPerMillisecond = Stopwatch.Frequency / 1000d;
 
         private IEnumerator OvenOrLockCo()
         {
-            //long start = Stopwatch.GetTimestamp();
-            long deadline = GetFrameDeadline();
+            long deadline = GetDeadline();
             foreach (var ent in BaseNetworkable.serverEntities)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
                 {
                     yield return null;
-                    deadline = GetFrameDeadline();
+                    deadline = GetDeadline();
                 }
                 if (IsUnloading)
                 {
@@ -537,7 +538,6 @@ namespace Oxide.Plugins
                     OnEntitySpawned(c);
                 }
             }
-            //Puts("Took {0:0.##}ms to process ovens and locks.", (Stopwatch.GetTimestamp() - start) / stopwatchTicksPerMillisecond);
         }
 
         private void BuildPrefabIds()
@@ -621,14 +621,14 @@ namespace Oxide.Plugins
             var instruction2 = CoroutineEx.waitForSeconds(60f);
             while (!IsUnloading)
             {
-                long deadline = GetFrameDeadline();
+                long deadline = GetDeadline();
                 bool changed = false;
                 foreach (var sleeper in BasePlayer.sleepingPlayerList)
                 {
                     if (Stopwatch.GetTimestamp() >= deadline)
                     {
                         yield return null;
-                        deadline = GetFrameDeadline();
+                        deadline = GetDeadline();
                     }
                     if (sleeper == null || !sleeper.userID.IsSteamId())
                     {
@@ -644,14 +644,14 @@ namespace Oxide.Plugins
                         changed = true;
                     }
                     yield return instruction1;
-                    deadline = GetFrameDeadline();
+                    deadline = GetDeadline();
                 }
                 foreach (var player in BasePlayer.activePlayerList)
                 {
                     if (Stopwatch.GetTimestamp() >= deadline)
                     {
                         yield return null;
-                        deadline = GetFrameDeadline();
+                        deadline = GetDeadline();
                     }
                     if (data.LastSeen.Remove(player.userID))
                     {
@@ -663,7 +663,7 @@ namespace Oxide.Plugins
                     SaveData();
                 }
                 yield return instruction2;
-                deadline = GetFrameDeadline();
+                deadline = GetDeadline();
             }
         }
 
@@ -789,7 +789,7 @@ namespace Oxide.Plugins
             // return if user doesn't have access to run console command
             if (!user.IsAdmin) return;
 
-            if (args.Length > 0 && (args[0] == "map" || args[0] == "unmap"))
+            if (command == "tpve" && args.Length > 0 && (args[0] == "map" || args[0] == "unmap"))
             {
                 if (user.HasPermission(PermCanMap))
                 {
@@ -799,7 +799,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (args.Contains("pvp"))
+            if (command == "tpve" && args.Length > 0 && args[0] == "pvp")
             {
                 if (currentRuleSet == null)
                 {
@@ -957,15 +957,21 @@ namespace Oxide.Plugins
 
         private void CommandMap(IPlayer user, string command, string[] args)
         {
-            // assume args[0] is the command (beyond /tpve)
-            if (args.Length > 0) command = args[0];
-
-            // shift arguments
-            args = args.Length > 1 ? args[1..] : Array.Empty<string>();
+            if (command == "tpve" && args.Length > 0)
+            {
+                command = args[0];
+                args = args.Length > 1 ? args[1..] : Array.Empty<string>();
+            }
 
             if (command != "map" && command != "unmap")
             {
                 Message(user, "Error_InvalidCommand");
+                return;
+            }
+
+            if (args.Length > 2)
+            {
+                Message(user, "Error_InvalidParamForCmd", command);
                 return;
             }
 
@@ -2329,6 +2335,12 @@ namespace Oxide.Plugins
             var selfDamageFlag = (_flags & RuleFlags.SelfDamage) != 0;
             var mountRulesEvaluated = false;
 
+            if (config.options.MountExclusion && !isVicId && isAtkId && HasDelayExclusion(attacker.userID) && HasDriver(entity, attacker, out var mounted))
+            {
+                if (trace) Trace($"Initiator ({attacker}) and target ({mounted}) meet exclusion conditions for mountable; allow and return", 1);
+                return true;
+            }
+
             if (isVicId)
             {
                 if (isAtkId)
@@ -3335,8 +3347,6 @@ namespace Oxide.Plugins
                 if (exclusion != null)
                 {
                     exclusions.Remove(exclusion);
-                    exclusion.plugin = null;
-                    exclusion.time = 0f;
                     Pool.Free(ref exclusion);
                 }
                 if (exclusions.Count == 0)
@@ -3369,8 +3379,6 @@ namespace Oxide.Plugins
                         return true;
                     }
                     exclusions.RemoveAt(i);
-                    exclusion.plugin = null;
-                    exclusion.time = 0f;
                     Pool.Free(ref exclusion);
                     i--;
                 }
@@ -3380,6 +3388,54 @@ namespace Oxide.Plugins
                     Pool.Free(ref exclusions);
                 }
             }
+            return false;
+        }
+
+        private bool HasDriver(BaseEntity entity, BasePlayer attacker, out BasePlayer driver)
+        {
+            while (entity != null)
+            {
+                if (entity is BasePlayer) break;
+
+                if (entity is HotAirBalloon balloon)
+                {
+                    if (balloon.children != null)
+                    {
+                        foreach (var child in balloon.children)
+                        {
+                            if (child is BasePlayer player && player != attacker && HasDelayExclusion(player.userID))
+                            {
+                                driver = player;
+                                return true;
+                            }
+                        }
+                    }
+
+                    break;
+                }
+
+                if (entity is BaseMountable mountable)
+                {
+                    BaseVehicle vehicle = mountable switch
+                    {
+                        BaseVehicleModule module => module.Vehicle,
+                        BaseVehicle baseVehicle => baseVehicle,
+                        _ => mountable.VehicleParent()
+                    };
+
+                    BasePlayer player = vehicle != null ? vehicle.GetDriver() : mountable.GetMounted();
+
+                    if (player != null && player != attacker && HasDelayExclusion(player.userID))
+                    {
+                        driver = player;
+                        return true;
+                    }
+                }
+
+                entity = entity.GetParentEntity();
+            }
+
+            driver = null;
             return false;
         }
 
@@ -3794,11 +3850,11 @@ namespace Oxide.Plugins
 
         private object OnEntityMarkHostile(BasePlayer player, float duration)
         {
-            if (player == null || Interface.CallHook("CanMarkEntityHostile", player, duration) is bool val && val)
+            if (player != null && (player.userID.IsSteamId() ? config.options.disablePlayerHostility : config.options.disableNpcHostility))
             {
-                return null;
+                return Interface.CallHook("CanMarkEntityHostile", player, duration) is true ? null : true;
             }
-            return true;
+            return null;
         }
 
         private void OnEntitySpawned(BeeGrenade ent) => ExplosiveHandler(ent);
@@ -3835,7 +3891,7 @@ namespace Oxide.Plugins
         private void CanRagdollDismount(BaseRagdoll ragdoll, BasePlayer player)
         {
             if (config.PreventRagdolling && ragdoll != null)
-            {            
+            {
                 ragdoll.dieOnImpact = false;
             }
         }
@@ -3853,7 +3909,23 @@ namespace Oxide.Plugins
 
         private bool IsKeptLivestock(LivestockAnimal livestock)
         {
-            return livestock.OwnerID.IsSteamId() || livestock.IsLeadable || livestock.IsLeading() || livestock.TryGetHomeCupboard(out _);
+            if (livestock.OwnerID.IsSteamId() || livestock.IsLeading())
+            {
+                return true;
+            }
+
+            if (livestock.acquaintances != null)
+            {
+                foreach (var acquaintance in livestock.acquaintances)
+                {
+                    if (acquaintance.userId != 0uL && acquaintance.seconds >= ConVar.Livestock.trustToLead)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return livestock.TryGetHomeCupboard(out _);
         }
 
         private bool ShouldBlockLivestockInteraction(LivestockAnimal livestock, BasePlayer player, bool useCache = false, long length = 1)
@@ -3862,8 +3934,6 @@ namespace Oxide.Plugins
             {
                 return false;
             }
-
-            useCache &= livestock.net != null;
 
             long now = 0L;
             (ulong livestockId, ulong userId) key = default;
@@ -4026,16 +4096,38 @@ namespace Oxide.Plugins
 
         private object OnEntityDistanceCheck(LivestockAnimal livestock, BasePlayer player, uint id, string debugName, float maximumDistance, bool checkParent)
         {
-            if (!config.options.Livestock.Leading || debugName != "RPC_Lead" || livestock == null || livestock.IsDestroyed || player == null || !player.userID.IsSteamId())
+            if (!config.options.Livestock.Leading || debugName != nameof(LivestockAnimal.RPC_Lead) || livestock == null || livestock.IsDestroyed || player == null || !player.userID.IsSteamId())
             {
                 return null;
             }
+
             return livestock.CanStopLead(player) || !ShouldBlockLivestockInteraction(livestock, player) ? null : false;
+        }
+
+        private object OnEntityDistanceCheck(BaseVehicleModule module, BasePlayer player, uint id, string debugName, float maximumDistance, bool checkParent)
+        {
+            if (!config.options.Livestock.Leading || debugName != nameof(LivestockMountable.RPC_UnloadAnimal) || module == null || module.IsDestroyed || player == null || !player.userID.IsSteamId())
+            {
+                return null;
+            }
+
+            if (module.NPCMountable is LivestockMountable mountable && mountable.occupants != null)
+            {
+                foreach (var occupant in mountable.occupants)
+                {
+                    if (occupant.Get(true).Is(out LivestockAnimal livestock) && !livestock.IsDestroyed && !livestock.IsDismounting && ShouldBlockLivestockInteraction(livestock, player))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return null;
         }
 
         private object OnEntityVisibilityCheck(Cow cow, BasePlayer player, uint id, string debugName, float maximumDistance)
         {
-            if (!config.options.Livestock.Milking || debugName != "MilkCow" || cow == null || cow.IsDestroyed || player == null || !player.userID.IsSteamId())
+            if (!config.options.Livestock.Milking || debugName != nameof(Cow.MilkCow) || cow == null || cow.IsDestroyed || player == null || !player.userID.IsSteamId())
             {
                 return null;
             }
@@ -4058,7 +4150,7 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private object OnLivestockAnimalFamiliarityAdd(LivestockAnimal livestock, ulong userId, float seconds, LivestockAnimal.FamiliarityReason reason)
+        private object OnLivestockAnimalFamiliarityAdd(LivestockAnimal livestock, ulong userId, float seconds)
         {
             if (!config.options.Livestock.Damage || seconds <= 0f || livestock == null || livestock.IsDestroyed || !userId.IsSteamId())
             {
@@ -4071,7 +4163,7 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            return ShouldBlockLivestockInteraction(livestock, player) ? false : null;
+            return ShouldBlockLivestockInteraction(livestock, player) ? true : null;
         }
 
         private object CanLivestockAnimalRefuseTarget(LivestockAnimal livestock, BasePlayer target)
@@ -4081,32 +4173,126 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            return ShouldBlockLivestockInteraction(livestock, target, true) ? true : null;
+            return ShouldBlockLivestockInteraction(livestock, target, livestock.net != null) ? true : null; // hook is called excessively, use caching
         }
 
-        [ConsoleCommand("tpve.resetfamiliarity")]
-        private void ccmdResetFamiliarity(ConsoleSystem.Arg arg)
+        private object OnLivestockAnimalClaim(LivestockAnimal livestock, HitchTrough trough)
+        {
+            if (!config.options.Livestock.Trough || livestock == null || livestock.IsDestroyed || trough == null || trough.IsDestroyed)
+            {
+                return null;
+            }
+
+            return livestock.OwnerID.IsSteamId() && livestock.OwnerID != trough.OwnerID ? true : null;
+        }
+
+        [ConsoleCommand("tpve.familiarity")]
+        private void ccmdFamiliarity(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            if (player == null || !player.IsAdmin)
+            if (player == null || !player.IsConnected)
             {
+                arg.ReplyWith("Use this command in game while looking at a cow or sheep.");
                 return;
             }
 
-            if (!GetRaycastTarget(player, out LivestockAnimal livestock) || livestock.acquaintances == null)
+            if (arg.GetString(0) is "reset")
             {
-                player.ConsoleMessage("Look at a cow or sheep.");
+                if (!player.IsAdmin)
+                {
+                    arg.ReplyWith("Only admins can reset livestock familiarity.");
+                    return;
+                }
+
+                if (!GetRaycastTarget(player, out LivestockAnimal livestock) || livestock is not (Cow or Sheep))
+                {
+                    arg.ReplyWith("Look at a cow or sheep.");
+                    return;
+                }
+
+                ResetLivestockFamiliarity(livestock);
+                arg.ReplyWith($"Reset {livestock} familiarity for everyone.");
                 return;
             }
 
-            for (int i = 0; i < livestock.acquaintances.Length; i++)
-            {
-                livestock.acquaintances[i].seconds = 0f;
-            }
-
-            player.ConsoleMessage($"Reset {livestock} familiarity for everyone.");
+            arg.ReplyWith("Usage: tpve.familiarity reset");
         }
 
+        private StringBuilder builder = new();
+        private Dictionary<string, ulong> _codes = new();
+        public string GetMultiplePlayers(List<BasePlayer> players)
+        {
+            builder.Clear();
+            for (int i = 0; i < players.Count && i < 10; i++)
+            {
+                BasePlayer player = players[i];
+                string code = $"{player.userID % 90000 + 10000}";
+                if (_codes.TryGetValue(code, out ulong userid) && userid != player.userID)
+                {
+                    code = player.UserIDString;
+                }
+                else
+                {
+                    _codes[code] = player.userID;
+                }
+                if (i != 0) builder.AppendLine();
+                builder.Append("<color=#FFA500>").Append(code).Append("</color> - ").Append(player.displayName);
+            }
+            return builder.ToString();
+        }
+
+        public bool FindTargets(string s, List<BasePlayer> targets)
+        {
+            if (string.IsNullOrWhiteSpace(s) || s.Length < 3)
+            {
+                return false;
+            }
+            if (_codes.TryGetValue(s, out ulong userid))
+            {
+                if (BasePlayer.TryFindAwakeOrSleepingByID(userid, out BasePlayer target))
+                {
+                    targets.Add(target);
+                    return true;
+                }
+                return false;
+            }
+            if (ulong.TryParse(s, out userid) && userid.IsSteamId())
+            {
+                if (BasePlayer.TryFindAwakeOrSleepingByID(userid, out BasePlayer target))
+                {
+                    targets.Add(target);
+                    return true;
+                }
+                return false;
+            }
+            foreach (BasePlayer player in BasePlayer.allPlayerList)
+            {
+                if (player.UserIDString == s || player.displayName.Contains(s, CompareOptions.OrdinalIgnoreCase))
+                {
+                    targets.Add(player);
+                }
+            }
+            return targets.Count > 0;
+        }
+
+        public float ResetLivestockFamiliarity(LivestockAnimal livestock)
+        {
+            float seconds = 0;
+            if (livestock.acquaintances != null)
+            {
+                for (int i = 0; i < livestock.acquaintances.Length; i++)
+                {
+                    seconds = Mathf.Max(seconds, livestock.acquaintances[i].seconds);
+                    livestock.acquaintances[i] = default;
+                }
+            }
+
+            livestock.probation = default;
+            livestock.probationCredited = float.MaxValue;
+            livestockLookupTimes.Clear();
+            return seconds;
+        }
+                
         #endregion Livestock
 
         #region Loot
@@ -5549,6 +5735,10 @@ namespace Oxide.Plugins
                             }
                         }
                     }
+                    if (locs.Count == 0 && entity is AutoTurret)
+                    {
+                        ZoneManager.Call("GetZonesAtPosition", entity.transform.position, locs);
+                    }
                 }
                 if (locs.Count > 0)
                 {
@@ -5629,12 +5819,15 @@ namespace Oxide.Plugins
             bool enabled = IsEnabled();
             var opt = config.options.Livestock;
 
+            bool wasHandlingDamage = (protectionHooks & ProtectionHook.Damage) != 0;
             UpdateHook(ProtectionHook.Damage, nameof(OnEntityTakeDamage), enabled);
+            if (wasHandlingDamage && !enabled) Interface.CallHook("OnTruePVEDisabled");
             UpdateHook(ProtectionHook.RefuseTarget, nameof(CanLivestockAnimalRefuseTarget), enabled && opt.Damage);
             UpdateHook(ProtectionHook.Familiarity, nameof(OnLivestockAnimalFamiliarityAdd), enabled && opt.Damage);
             UpdateHook(ProtectionHook.Leading, nameof(OnEntityDistanceCheck), enabled && opt.Leading);
             UpdateHook(ProtectionHook.Milking, nameof(OnEntityVisibilityCheck), enabled && opt.Milking);
             UpdateHook(ProtectionHook.Shearing, nameof(OnPlayerAttack), enabled && opt.Shearing);
+            UpdateHook(ProtectionHook.Trough, nameof(OnLivestockAnimalClaim), enabled && opt.Trough);
 
             void UpdateHook(ProtectionHook flag, string hook, bool required)
             {
@@ -5741,6 +5934,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Prevent non-allies from shearing")]
             public bool Shearing = true;
+
+            [JsonProperty(PropertyName = "Prevent non-owners from claiming by trough")]
+            public bool Trough = true;
         }
 
         private class ConfigurationOptions
@@ -5788,7 +5984,13 @@ namespace Oxide.Plugins
             public bool disableBaseOvenSplash;
 
             [JsonProperty(PropertyName = "Prevent Players From Being Marked Hostile")]
-            public bool disableHostility;
+            public bool disablePlayerHostility;
+
+            [JsonProperty(PropertyName = "Prevent Npcs From Being Marked Hostile")]
+            public bool disableNpcHostility;
+
+            [JsonProperty(PropertyName = "PVP delay exclusion extends to mounts (DynamicPVP plugin)")]
+            public bool MountExclusion;
 
             [JsonProperty(PropertyName = "Allow PVP Damage In Deep Sea")]
             public bool DeepSeaPVP;
