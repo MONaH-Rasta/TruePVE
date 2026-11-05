@@ -20,7 +20,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.7")]
+    [Info("TruePVE", "nivex", "2.4.8")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -1203,6 +1203,7 @@ namespace Oxide.Plugins
                 ["traps"] = new() { "spikes.trap" },
                 ["barricades2"] = new() { "barricade.medieval", "barricade.cover.wood", "barricade.cover.wood_double" },
                 ["farm"] = new() { nameof(Sheep), nameof(Cow) },
+                ["resources"] = new() { nameof(MonumentBlocker) },
             };
 
             for (int i = 0; i < config.groups.Count; i++)
@@ -1477,7 +1478,7 @@ namespace Oxide.Plugins
 
             config.groups.Add(new("resources")
             {
-                members = "ResourceEntity, TreeEntity, OreResourceEntity, LootContainer, NaturalBeehive, VineSwingingTree",
+                members = "ResourceEntity, TreeEntity, OreResourceEntity, LootContainer, NaturalBeehive, VineSwingingTree, MonumentBlocker",
                 exclusions = "hobobarrel.deployed"
             });
 
