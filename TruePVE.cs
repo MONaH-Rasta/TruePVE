@@ -13,6 +13,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.Serialization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Unity.Collections;
@@ -20,7 +21,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("TruePVE", "nivex", "2.4.8")]
+    [Info("TruePVE", "nivex", "2.4.9")]
     [Description("Improvement of the default Rust PVE behavior")]
     // Thanks to the original author, ignignokt84.
     internal class TruePVE : RustPlugin
@@ -89,6 +90,7 @@ namespace Oxide.Plugins
             HopperCannotTargetEnemyLoot = 1uL << 47,
             VehiclesTakeCollisionDamage = 1uL << 48,
             TrapsUnprotected = 1uL << 49,
+            AllowPlayerLooting = 1uL << 50,
         }
 
         [Flags]
@@ -301,6 +303,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnCupboardAuthorize));
             Unsubscribe(nameof(CanHelicopterStrafeTarget));
             Unsubscribe(nameof(CanWaterBallSplash));
+            Unsubscribe(nameof(CanBeSplashed));
             Unsubscribe(nameof(OnEntityMarkHostile));
             Unsubscribe(nameof(OnEntitySpawned));
             Unsubscribe(nameof(OnEntityEnter));
@@ -401,7 +404,7 @@ namespace Oxide.Plugins
             dudRuleSet = config.GetDudRuleSet();
             if (currentRuleSet == null)
                 Puts(GetMessage("Warning_NoRuleSet"), config.defaultRuleSet);
-            SetUseZones();
+            TryBuildExclusionMappings();
             if (config.schedule.enabled)
             {
                 TimerLoop(true);
@@ -414,9 +417,13 @@ namespace Oxide.Plugins
             {
                 Subscribe(nameof(CanHelicopterStrafeTarget));
             }
-            if (config.PreventThrowingWaterInFreezingBiome || config.BlockRadioactiveWaterDamage)
+            if (config.BlockRadioactiveWaterDamage)
             {
                 Subscribe(nameof(CanWaterBallSplash));
+            }
+            if (config.PreventSplash)
+            {
+                Subscribe(nameof(CanBeSplashed));
             }
             if (currentRuleSet == null)
             {
@@ -560,6 +567,7 @@ namespace Oxide.Plugins
         private void OnNewSave()
         {
             data = new();
+            TryBuildExclusionMappings();
             SaveData();
         }
 
@@ -1311,14 +1319,7 @@ namespace Oxide.Plugins
 
         protected void TryBuildExclusionMappings()
         {
-            if (!config.mappings.TryGetValue(AllZones, out var val) || !val.Equals("exclude", StringComparison.OrdinalIgnoreCase))
-            {
-                BuildExclusionMappings();
-            }
-            else if (!data.mappings.TryGetValue(AllZones, out val) || !val.Equals("exclude", StringComparison.OrdinalIgnoreCase))
-            {
-                BuildExclusionMappings();
-            }
+            BuildExclusionMappings();
             SetUseZones();
         }
 
@@ -2321,11 +2322,20 @@ namespace Oxide.Plugins
 
             if (trace) Trace("No exclusion found - looking up RuleSet...", 1);
 
-            if (isVicId && !isAtkId && weapon is BeeGrenade && ruleSet.rules.Contains("players cannot hurt players"))
+            if (!isAtkId && ruleSet.rules.Contains("players cannot hurt players"))
             {
-                if (trace) Trace($"Victim is {victim}; no initiator set for Bee Grenade; players cannot hurt players", 1);
-                info.damageTypes.ScaleAll(0f);
-                return true;
+                if (initiator is TimedExplosive && initiator.ShortPrefabName is "boulder_explosive_deployed" or "boulder_explosive") // deployed vs catapulted
+                {
+                    if (trace) Trace($"Victim is {victim}; no attacker set for propane bomb; block and return (players cannot hurt players)", 1);
+                    info.damageTypes.ScaleAll(0f);
+                    return true;
+                }
+                if (isVicId && weapon is BeeGrenade)
+                {
+                    if (trace) Trace($"Victim is {victim}; no initiator set for Bee Grenade; block and return (players cannot hurt players)", 1);
+                    info.damageTypes.ScaleAll(0f);
+                    return true;
+                }
             }
 
             // process location rules
@@ -3832,19 +3842,24 @@ namespace Oxide.Plugins
             return (ruleSet._flags & RuleFlags.NoMLRSDamage) != 0 ? true : null;
         }
 
-        private object CanWaterBallSplash(ItemDefinition liquidDef, Vector3 position, float radius, int amount)
+        private object CanWaterBallSplash(ItemDefinition liquidDef, Vector3 position, float radius, int amount, bool funWater)
         {
-            if (config.PreventThrowingWaterInFreezingBiome && TerrainMeta.BiomeMap != null)
+            if (config.BlockRadioactiveWaterDamage && liquidDef == WaterTypes.RadioactiveWaterItemDef)
             {
-                TerrainBiome.Enum biome = (TerrainBiome.Enum)TerrainMeta.BiomeMap.GetBiomeMaxType(position);
+                return false;
+            }
+            return null;
+        }
+
+        private object CanBeSplashed(BasePlayer player, ItemDefinition splashType, int amount)
+        {
+            if (config.PreventSplash && TerrainMeta.BiomeMap != null && player != null && !player.IsDestroyed)
+            {
+                TerrainBiome.Enum biome = (TerrainBiome.Enum)TerrainMeta.BiomeMap.GetBiomeMaxType(player.transform.position);
                 if (biome == TerrainBiome.Enum.Arctic || biome == TerrainBiome.Enum.Tundra)
                 {
                     return false;
                 }
-            }
-            if (config.BlockRadioactiveWaterDamage && liquidDef == WaterTypes.RadioactiveWaterItemDef)
-            {
-                return false;
             }
             return null;
         }
@@ -3880,7 +3895,6 @@ namespace Oxide.Plugins
             }
         }
 
-#if OXIDE_PUBLICIZED || CARBON
         private void OnEntitySpawned(RidableHorse horse)
         {
             if (config.PreventRagdolling && horse != null)
@@ -3896,7 +3910,6 @@ namespace Oxide.Plugins
                 ragdoll.dieOnImpact = false;
             }
         }
-#endif
 
         #region Livestock
 
@@ -4293,7 +4306,7 @@ namespace Oxide.Plugins
             livestockLookupTimes.Clear();
             return seconds;
         }
-                
+
         #endregion Livestock
 
         #region Loot
@@ -4318,6 +4331,20 @@ namespace Oxide.Plugins
                 if (CheckExclusion(looterLocations, targetLocations, trace))
                 {
                     return null;
+                }
+
+                if (target is LootableCorpse or DroppedItemContainer || (target is BasePlayer victim && victim.IsWounded()))
+                {
+                    RuleSet ruleSet = GetRuleSet(targetLocations, looterLocations);
+                    if (ruleSet != null && (ruleSet._flags & RuleFlags.AllowPlayerLooting) != 0)
+                    {
+                        return null;
+                    }
+
+                    if (Interface.CallHook("CanPlayerLoot", looter, target) is true)
+                    {
+                        return null;
+                    }
                 }
             }
             return IsAlly(looter, ownerID) ? null : true;
@@ -5259,6 +5286,11 @@ namespace Oxide.Plugins
                 return defaultValue;
             }
 
+            if (entity.prefabID == 0u)
+            {
+                return entity.GetType().Name;
+            }
+
             if (!_typeNameLookup.TryGetValue(entity.prefabID, out string name))
             {
                 BaseEntity prefab = entity.LookupPrefab();
@@ -5363,6 +5395,7 @@ namespace Oxide.Plugins
                     if (config.mappings.TryGetValue(loc, out string mapping) || data.mappings.TryGetValue(loc, out mapping))
                     {
                         names.Add(mapping);
+                        if (trace) Trace($"Location \"{loc}\" maps to \"{mapping}\"", 3);
                     }
                 }
 
@@ -5545,7 +5578,7 @@ namespace Oxide.Plugins
                     SetExposedMappings();
                     Interface.CallHook("OnRemovedMappings", _mappings);
                 });
-                SetUseZones();
+                TryBuildExclusionMappings();
                 return true;
             }
             return false;
@@ -5736,7 +5769,7 @@ namespace Oxide.Plugins
                             }
                         }
                     }
-                    if (locs.Count == 0 && entity is AutoTurret)
+                    if (locs.Count == 0 && (entity is AutoTurret or FireBall))
                     {
                         ZoneManager.Call("GetZonesAtPosition", entity.transform.position, locs);
                     }
@@ -6296,8 +6329,11 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Prevent heli from strafing in the inner radius of safe zones")]
             public bool PreventSafeZoneStrafing;
 
-            [JsonProperty(PropertyName = "Prevent players from throwing water in arctic and tundra biome")]
-            public bool PreventThrowingWaterInFreezingBiome;
+            [JsonProperty(PropertyName = "Prevent players from throwing water in arctic and tundra biome", NullValueHandling = NullValueHandling.Ignore)]
+            public bool? _Freeze = null;
+
+            [JsonProperty(PropertyName = "Prevent water splashes from affecting players in arctic and tundra biomes")]
+            public bool PreventSplash;
 
             [JsonProperty(PropertyName = "Prevent ragdolling when struck by another vehicle")]
             public bool PreventRagdolling = true;
@@ -6381,6 +6417,12 @@ namespace Oxide.Plugins
                     defaultAllowDamage = false,
                     enabled = true
                 };
+            }
+
+            [OnDeserialized]
+            private void OnDeserializedNames(StreamingContext context)
+            {
+                if (_Freeze.HasValue) { PreventSplash = _Freeze.Value; _Freeze = null; }
             }
         }
 
